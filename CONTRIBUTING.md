@@ -5,10 +5,7 @@ Thanks for considering a contribution! This project is a single-file userscript,
 ## Ground rules
 
 - Keep the userscript a **single file** with no build step. Anything that requires bundling or transpilation should be discussed in an issue first.
-- Preserve the **English-default / Russian-localised** split:
-  - `claude-code-web-archiver.user.js` — English UI, default.
-  - `i18n/claude-code-web-archiver.ru.user.js` — Russian UI, kept in sync.
-  - When you change behaviour, update **both** files.
+- All UI strings live in the `I18N` object at the top of the script. When you add a string, add it to **both** `I18N.en` and `I18N.ru`. The language is auto-selected from `navigator.language` (Russian for `ru*`, English otherwise).
 - Don't add tracking, analytics or external network calls. The script must remain local-only.
 - Keep `@grant` and `@connect` lists minimal — only add a host if you truly need it.
 
@@ -22,9 +19,10 @@ Thanks for considering a contribution! This project is a single-file userscript,
 3. Make your changes. Bump `@version` in the userscript header and the `VERSION` constant when the change is user-visible.
 4. Test manually:
    - Install your modified script in Tampermonkey / Violentmonkey.
-   - Open a real Claude Code Web session and click **Archive session**.
+   - Open a real Claude Code Web session and click **⬇ Archive**.
    - Verify the resulting HTML opens, all messages are present, screenshots are inlined, and ordering is correct.
-   - Repeat for the Russian build if you touched localised strings.
+   - Repeat with **⚡ Fast** and **📝 No code** toggled on if you touched their code paths.
+   - Set `navigator.language` to `ru` (or temporarily flip `pickLang()`) to spot-check Russian strings.
 5. Commit with a clear message and open a Pull Request describing what changed and how you tested it.
 
 ## Style
