@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-05-21
+
+### Fixed
+- **No-code mode now actually strips tool-call code.** v1.1.0 only removed `<pre>` and a
+  couple of class-name patterns, which missed Claude Code Web's real shapes (tool calls
+  rendered as `<details>` blocks, `font-mono` containers, `data-testid="tool-*"` /
+  `artifact` / `diff` containers, block-level `<code>`). The selector list now covers
+  these and we also detect block-level `<code>` via `getComputedStyle` on the live DOM.
+- When No-code is on, the auto-scroll no longer wastes time expanding `<details>`
+  tool-call blocks (they're stripped anyway).
+
 ## [1.1.0] - 2026-05-21
 
 ### Added

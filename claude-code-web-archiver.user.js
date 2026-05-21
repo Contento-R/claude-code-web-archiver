@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.1.0
+// @version      1.1.1
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Bilingual UI (EN/RU) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU по локали браузера.
 // @author       Contento-R
@@ -27,7 +27,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.1.0';
+    const VERSION = '1.1.1';
 
     // ===== I18N =====
     const I18N = {
@@ -187,6 +187,56 @@
         return img.currentSrc || img.src || img.getAttribute('data-src') || '';
     }
 
+    // ===== STRIP CODE / TOOL-CALL BLOCKS FROM A CLONE =====
+    // Claude Code Web puts code in many shapes: <pre> for markdown fences,
+    // <details> wrappers for tool calls (Bash/Edit/Write/etc.), and various
+    // monospace / syntax-highlighter containers. Try to catch all of them while
+    // keeping inline <code> spans inside running prose intact.
+    const CODE_SELECTORS = [
+        'pre',
+        'details',
+        '[class*="code-block" i]',
+        '[class*="codeblock" i]',
+        '[class*="code_block" i]',
+        '[class*="language-" i]',
+        '[class*="hljs" i]',
+        '[class*="shiki" i]',
+        '[class*="prism" i]',
+        '[data-language]',
+        '[data-code-block]',
+        '[data-testid*="code" i]',
+        '[data-testid*="tool" i]',
+        '[data-testid*="artifact" i]',
+        '[data-testid*="diff" i]',
+        '[aria-label*="code" i]',
+    ];
+    function stripCode(clone, liveNode) {
+        let removed = 0;
+        // Selector-based removal.
+        clone.querySelectorAll(CODE_SELECTORS.join(',')).forEach(e => { e.remove(); removed++; });
+        // Monospace containers with substantial content (tool output, diffs, file viewers).
+        clone.querySelectorAll('[class*="font-mono" i]').forEach(e => {
+            if ((e.textContent || '').trim().length > 30) { e.remove(); removed++; }
+        });
+        // Block-level <code> elements (display:block) — measure on the live DOM
+        // since the clone is detached.
+        if (liveNode && liveNode.querySelectorAll) {
+            const liveCodes = [...liveNode.querySelectorAll('code')];
+            const cloneCodes = [...clone.querySelectorAll('code')];
+            for (let i = 0; i < cloneCodes.length && i < liveCodes.length; i++) {
+                try {
+                    const cs = getComputedStyle(liveCodes[i]);
+                    if (cs && (cs.display === 'block' || cs.display === 'flex' || cs.display === 'grid')) {
+                        cloneCodes[i].remove();
+                        removed++;
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        }
+        if (removed) console.debug('[archiver] skipCode removed', removed, 'code-like element(s) from one message');
+        return removed;
+    }
+
     // ===== SANITIZE A LIVE NODE INTO PORTABLE HTML =====
     function sanitizeClone(node) {
         const clone = node.cloneNode(true);
@@ -199,12 +249,7 @@
             cloneImgs[i].removeAttribute('data-src');
         }
         clone.querySelectorAll('script,style,svg,noscript,input,textarea').forEach(e => e.remove());
-        if (skipCode) {
-            // Strip code blocks Claude writes: <pre> wrappers, tool-call disclosures,
-            // and elements whose role hints at code.
-            clone.querySelectorAll('pre').forEach(e => e.remove());
-            clone.querySelectorAll('[class*="code-block" i],[class*="codeblock" i],[data-language]').forEach(e => e.remove());
-        }
+        if (skipCode) stripCode(clone, node);
         clone.querySelectorAll('button,[role="button"]').forEach(b => {
             const span = document.createElement('span');
             span.innerHTML = b.innerHTML;
@@ -221,7 +266,11 @@
     // ===== EXPAND SAFE DISCLOSURE ELEMENTS IN VIEW =====
     async function expandInView(container) {
         const toOpen = [];
-        container.querySelectorAll('details:not([open])').forEach(d => toOpen.push(['details', d]));
+        // When skipCode is on, <details> blocks are tool-call code and will be
+        // dropped anyway — don't pay the time to open them.
+        if (!skipCode) {
+            container.querySelectorAll('details:not([open])').forEach(d => toOpen.push(['details', d]));
+        }
         container.querySelectorAll('[aria-expanded="false"]').forEach(el => toOpen.push(['aria', el]));
         if (toOpen.length === 0) return;
         // Open <details> synchronously in a batch (no per-item wait needed).
