@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-05-21
+
+### Fixed
+- **No-code mode now strips code regardless of how Claude Code Web wraps it.**
+  Class names changed often enough that selectors alone kept missing code. The
+  primary detector is now `getComputedStyle(...).fontFamily` on the LIVE DOM:
+  any container rendered with a monospace font and ≥25 chars of text is treated
+  as code and removed. Selector list is kept as a fast first pass.
+- Moved `stripCode` to run BEFORE `script/style/svg` removal so the clone is
+  still a 1:1 mirror of the live node — needed for the parallel index walk
+  that maps live computed styles to clone elements.
+- Only the outermost matched element of each subtree is removed (saves work,
+  cleaner output).
+
+### Added
+- Script version (e.g. `v1.1.2`) is displayed in the top-right corner of the
+  progress overlay popup.
+
 ## [1.1.1] - 2026-05-21
 
 ### Fixed

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.1.1
+// @version      1.1.2
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Bilingual UI (EN/RU) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU по локали браузера.
 // @author       Contento-R
@@ -27,7 +27,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.1.1';
+    const VERSION = '1.1.2';
 
     // ===== I18N =====
     const I18N = {
@@ -190,8 +190,9 @@
     // ===== STRIP CODE / TOOL-CALL BLOCKS FROM A CLONE =====
     // Claude Code Web puts code in many shapes: <pre> for markdown fences,
     // <details> wrappers for tool calls (Bash/Edit/Write/etc.), and various
-    // monospace / syntax-highlighter containers. Try to catch all of them while
-    // keeping inline <code> spans inside running prose intact.
+    // custom containers. Class names change often, so the primary detector is
+    // computed `font-family` on the LIVE DOM — code is rendered with a
+    // monospace font regardless of how the container is named.
     const CODE_SELECTORS = [
         'pre',
         'details',
@@ -202,6 +203,7 @@
         '[class*="hljs" i]',
         '[class*="shiki" i]',
         '[class*="prism" i]',
+        '[class*="font-mono" i]',
         '[data-language]',
         '[data-code-block]',
         '[data-testid*="code" i]',
@@ -209,37 +211,68 @@
         '[data-testid*="artifact" i]',
         '[data-testid*="diff" i]',
         '[aria-label*="code" i]',
-    ];
+    ].join(',');
+    const MONO_RE = /mono|courier|consolas|menlo|monaco|fira\s*code|jetbrains/i;
+    // Anything above this many monospace characters is treated as a code block
+    // and stripped; below it we assume it's an inline technical term and keep it.
+    const MONO_MIN_LEN = 25;
+
     function stripCode(clone, liveNode) {
-        let removed = 0;
-        // Selector-based removal.
-        clone.querySelectorAll(CODE_SELECTORS.join(',')).forEach(e => { e.remove(); removed++; });
-        // Monospace containers with substantial content (tool output, diffs, file viewers).
-        clone.querySelectorAll('[class*="font-mono" i]').forEach(e => {
-            if ((e.textContent || '').trim().length > 30) { e.remove(); removed++; }
-        });
-        // Block-level <code> elements (display:block) — measure on the live DOM
-        // since the clone is detached.
-        if (liveNode && liveNode.querySelectorAll) {
-            const liveCodes = [...liveNode.querySelectorAll('code')];
-            const cloneCodes = [...clone.querySelectorAll('code')];
-            for (let i = 0; i < cloneCodes.length && i < liveCodes.length; i++) {
-                try {
-                    const cs = getComputedStyle(liveCodes[i]);
-                    if (cs && (cs.display === 'block' || cs.display === 'flex' || cs.display === 'grid')) {
-                        cloneCodes[i].remove();
-                        removed++;
-                    }
-                } catch (e) { /* ignore */ }
+        if (!liveNode || !liveNode.querySelectorAll) return 0;
+        const liveAll = [liveNode, ...liveNode.querySelectorAll('*')];
+        const cloneAll = [clone, ...clone.querySelectorAll('*')];
+        const aligned = liveAll.length === cloneAll.length;
+        const toRemove = new Set();
+
+        // Pass 1 — selector match on the clone (cheap, always works).
+        clone.querySelectorAll(CODE_SELECTORS).forEach(e => toRemove.add(e));
+
+        // Pass 2 — computed-style scan on the live DOM, mapped to clone by index.
+        // This is the catch-all: any container rendered with a monospace font and
+        // substantial text is treated as code.
+        if (aligned) {
+            for (let i = 0; i < liveAll.length; i++) {
+                const le = liveAll[i];
+                const ce = cloneAll[i];
+                if (!le || !ce || !(le instanceof Element)) continue;
+                let cs;
+                try { cs = getComputedStyle(le); } catch (_) { continue; }
+                if (!cs) continue;
+
+                const ff = cs.fontFamily || '';
+                if (MONO_RE.test(ff)) {
+                    const txt = (le.textContent || '').trim();
+                    if (txt.length >= MONO_MIN_LEN) toRemove.add(ce);
+                    continue;
+                }
+                // Block-level <code> outside <pre> — usually an editor / file viewer.
+                if (le.tagName === 'CODE') {
+                    const d = cs.display;
+                    if (d === 'block' || d === 'flex' || d === 'grid') toRemove.add(ce);
+                }
             }
         }
-        if (removed) console.debug('[archiver] skipCode removed', removed, 'code-like element(s) from one message');
+
+        // Remove only the outermost marked element of each subtree so we don't
+        // waste work removing children that are already going away with their parent.
+        let removed = 0;
+        for (const e of toRemove) {
+            let p = e.parentElement, nested = false;
+            while (p) { if (toRemove.has(p)) { nested = true; break; } p = p.parentElement; }
+            if (nested) continue;
+            try { e.remove(); removed++; } catch (_) { /* ignore */ }
+        }
+        if (removed) console.debug('[archiver] skipCode removed', removed, 'code-like element(s)');
         return removed;
     }
 
     // ===== SANITIZE A LIVE NODE INTO PORTABLE HTML =====
     function sanitizeClone(node) {
         const clone = node.cloneNode(true);
+        // Run skipCode FIRST, while the clone is still a 1:1 mirror of the live
+        // node — stripCode uses parallel indexing into live/clone to read
+        // computed styles.
+        if (skipCode) stripCode(clone, node);
         const liveImgs = node.querySelectorAll('img');
         const cloneImgs = clone.querySelectorAll('img');
         for (let i = 0; i < cloneImgs.length; i++) {
@@ -249,7 +282,6 @@
             cloneImgs[i].removeAttribute('data-src');
         }
         clone.querySelectorAll('script,style,svg,noscript,input,textarea').forEach(e => e.remove());
-        if (skipCode) stripCode(clone, node);
         clone.querySelectorAll('button,[role="button"]').forEach(b => {
             const span = document.createElement('span');
             span.innerHTML = b.innerHTML;
@@ -543,8 +575,9 @@ main{max-width:980px;margin:0 auto;padding:24px}
 .cc-arch-panel button.active{background:#052e1a;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
 .cc-arch-panel button:disabled{opacity:.6;cursor:not-allowed}
 .cc-arch-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483646;display:flex;align-items:flex-end;justify-content:center;padding-bottom:90px;pointer-events:none}
-.cc-arch-card{background:#171a21;color:#e6e8eb;border:1px solid #2a2f3a;border-radius:12px;padding:14px 18px;min-width:320px;max-width:80vw;font:14px sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.5);pointer-events:auto}
+.cc-arch-card{background:#171a21;color:#e6e8eb;border:1px solid #2a2f3a;border-radius:12px;padding:14px 18px;min-width:320px;max-width:80vw;font:14px sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.5);pointer-events:auto;position:relative}
 .cc-arch-card .p{margin-bottom:10px}
+.cc-arch-card .ver{position:absolute;top:8px;right:12px;font-size:11px;color:#6b7280;letter-spacing:.02em}
 .cc-arch-card button{background:#d93025;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:700}
 `;
         document.head.appendChild(s);
@@ -552,7 +585,7 @@ main{max-width:980px;margin:0 auto;padding:24px}
     function showOverlay() {
         overlay = document.createElement('div');
         overlay.className = 'cc-arch-overlay';
-        overlay.innerHTML = `<div class="cc-arch-card"><div class="p" id="cc-arch-progress">${esc(T.startingShort)}</div><button id="cc-arch-cancel">${esc(T.cancel)}</button></div>`;
+        overlay.innerHTML = `<div class="cc-arch-card"><div class="ver">v${esc(VERSION)}</div><div class="p" id="cc-arch-progress">${esc(T.startingShort)}</div><button id="cc-arch-cancel">${esc(T.cancel)}</button></div>`;
         document.body.appendChild(overlay);
         progressEl = overlay.querySelector('#cc-arch-progress');
         overlay.querySelector('#cc-arch-cancel').onclick = () => { cancelled = true; setProgress(T.cancelling); };
