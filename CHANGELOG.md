@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-05-21
+
+### Fixed
+- **Script now actually loads on Claude Code Web pages.** Claude Code is
+  hosted at `code.claude.com`, not `claude.ai/code` — the previous `@match`
+  list didn't cover the real domain so the userscript was never injected.
+  Added `https://code.claude.com/*` to `@match` and `code.claude.com` to
+  `@connect`. Also added bare `https://claude.ai/code` and
+  `https://claude.com/code` (no trailing slash) so the matcher fires on the
+  index URL too, not only on `/code/<something>`.
+
 ## [1.1.2] - 2026-05-21
 
 ### Fixed

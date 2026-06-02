@@ -1,16 +1,20 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.1.2
+// @version      1.1.3
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Bilingual UI (EN/RU) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU по локали браузера.
 // @author       Contento-R
 // @license      MIT
 // @homepageURL  https://github.com/Contento-R/claude-code-web-archiver
 // @supportURL   https://github.com/Contento-R/claude-code-web-archiver/issues
+// @match        https://code.claude.com/*
+// @match        https://claude.ai/code
 // @match        https://claude.ai/code/*
+// @match        https://claude.com/code
 // @match        https://claude.com/code/*
 // @grant        GM_xmlhttpRequest
+// @connect      code.claude.com
 // @connect      claude.ai
 // @connect      claude.com
 // @connect      anthropic.com
@@ -27,7 +31,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.1.2';
+    const VERSION = '1.1.3';
 
     // ===== I18N =====
     const I18N = {

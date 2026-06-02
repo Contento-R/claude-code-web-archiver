@@ -2,7 +2,7 @@
 
 > Save the **entire** Claude Code Web session — including history the cloud has already compacted — into a single self-contained HTML file with all screenshots embedded as data URLs.
 
-A small Tampermonkey / Violentmonkey / Greasemonkey userscript that adds a small, draggable green panel to [claude.ai/code](https://claude.ai/code) and [claude.com/code](https://claude.com/code). The panel exposes three controls:
+A small Tampermonkey / Violentmonkey / Greasemonkey userscript that adds a small, draggable green panel to [code.claude.com](https://code.claude.com), [claude.ai/code](https://claude.ai/code) and [claude.com/code](https://claude.com/code). The panel exposes three controls:
 
 | Button         | What it does                                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -31,7 +31,7 @@ Claude Code Web compacts long sessions. Older turns disappear from the live thre
 2. Open the raw userscript — your manager will pick it up:
    [`claude-code-web-archiver.user.js`](https://github.com/Contento-R/claude-code-web-archiver/raw/main/claude-code-web-archiver.user.js)
 3. Confirm the install.
-4. Open any session at `https://claude.ai/code/*` or `https://claude.com/code/*`. The green panel appears in the bottom-right corner.
+4. Open any session at `https://code.claude.com/*`, `https://claude.ai/code/*` or `https://claude.com/code/*`. The green panel appears in the bottom-right corner.
 
 ## Use
 
@@ -101,7 +101,7 @@ Edit them in the installed script — your userscript manager applies changes im
 
 The script requests `GM_xmlhttpRequest` and `@connect` access to:
 
-- `claude.ai`, `claude.com`, `anthropic.com` — message containers and attachments
+- `code.claude.com`, `claude.ai`, `claude.com`, `anthropic.com` — message containers and attachments
 - `cloudfront.net`, `amazonaws.com` — image CDNs Claude uses
 - `self` — same-origin fetches
 
