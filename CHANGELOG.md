@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-05-21
+
+### Fixed
+- **Messages now appear in chronological order in the exported HTML.**
+  v1.1.3 used a left/right-neighbour heuristic over DOM child order to merge
+  successive scroll batches into a single sequence. In Claude Code Web's
+  virtualized list, DOM child order doesn't match visual order — messages
+  came out shuffled. The new strategy:
+  - On first capture of a message, record its absolute Y position inside
+    the scrollable container (`rect.top - containerRect.top + scrollTop`).
+  - After scrolling completes, sort all captured messages by Y (with
+    insertion sequence as a stable tiebreaker) to build the final order.
+- Removed the `mergeOrder` helper; order is computed once at the end.
+
 ## [1.1.3] - 2026-05-21
 
 ### Fixed

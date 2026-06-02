@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.1.3
+// @version      1.1.4
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Bilingual UI (EN/RU) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU по локали браузера.
 // @author       Contento-R
@@ -31,7 +31,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.1.3';
+    const VERSION = '1.1.4';
 
     // ===== I18N =====
     const I18N = {
@@ -133,8 +133,12 @@
     let cancelled = false;
     let fastMode = false;
     let skipCode = false;
-    const messages = new Map();   // key -> { html, role }
-    let order = [];               // ordered keys (conversation order)
+    // key -> { html, role, y, seq }
+    //   y   = absolute Y position inside the chat container at first capture
+    //   seq = insertion counter, used as a stable tiebreaker
+    const messages = new Map();
+    let seqCounter = 0;
+    let order = [];               // final chronological order, computed after scroll
     let chatContainer = null;
     const cfg = () => (fastMode ? CFG_FAST : CFG_NORMAL);
 
@@ -326,39 +330,38 @@
     }
 
     // ===== CAPTURE WHAT'S CURRENTLY IN THE DOM =====
+    // For each newly-seen message, record its absolute Y position inside the
+    // scrollable chat container. Visual top-to-bottom order = chronological
+    // order in the chat, so we sort the whole map by Y once scrolling is done.
+    // This avoids relying on DOM child order, which is meaningless in
+    // virtualized lists.
     function captureVisible(container) {
+        const containerRect = container.getBoundingClientRect();
+        const scrollY = container.scrollTop || 0;
         const nodes = findMessageNodes(container);
-        const curKeys = [];
         for (const node of nodes) {
             const text = (node.innerText || node.textContent || '').trim();
             if (text.length < cfg().minTextLen) continue;
             const k = keyOf(text);
-            curKeys.push(k);
-            if (!messages.has(k)) {
-                messages.set(k, { html: sanitizeClone(node).outerHTML, role: guessRole(node) });
-            }
+            if (messages.has(k)) continue;
+            let y = 0;
+            try {
+                const rect = node.getBoundingClientRect();
+                y = rect.top - containerRect.top + scrollY;
+            } catch (e) { y = scrollY; }
+            messages.set(k, {
+                html: sanitizeClone(node).outerHTML,
+                role: guessRole(node),
+                y,
+                seq: seqCounter++,
+            });
         }
-        mergeOrder(curKeys);
     }
 
-    function mergeOrder(curKeys) {
-        if (order.length === 0) {
-            const seen = new Set();
-            for (const k of curKeys) if (!seen.has(k)) { order.push(k); seen.add(k); }
-            return;
-        }
-        const known = new Set(order);
-        for (let i = 0; i < curKeys.length; i++) {
-            const k = curKeys[i];
-            if (known.has(k)) continue;
-            let left = null, right = null;
-            for (let j = i - 1; j >= 0; j--) if (known.has(curKeys[j])) { left = curKeys[j]; break; }
-            for (let j = i + 1; j < curKeys.length; j++) if (known.has(curKeys[j])) { right = curKeys[j]; break; }
-            if (left) order.splice(order.indexOf(left) + 1, 0, k);
-            else if (right) order.splice(order.indexOf(right), 0, k);
-            else order.push(k);
-            known.add(k);
-        }
+    function buildOrder() {
+        return [...messages.entries()]
+            .sort((a, b) => (a[1].y - b[1].y) || (a[1].seq - b[1].seq))
+            .map(([k]) => k);
     }
 
     // ===== AUTO-SCROLL THROUGH THE WHOLE SESSION =====
@@ -370,7 +373,7 @@
         while (!cancelled && steps < cfg().maxSteps) {
             await expandInView(container);
             captureVisible(container);
-            setProgress(T.scrolling(order.length));
+            setProgress(T.scrolling(messages.size));
 
             const top = container.scrollTop;
             const atBottom = top + container.clientHeight >= container.scrollHeight - 4;
@@ -536,7 +539,7 @@ main{max-width:980px;margin:0 auto;padding:24px}
         if (busy) return;
         if (!confirm(T.confirm)) return;
         busy = true; cancelled = false;
-        messages.clear(); order = [];
+        messages.clear(); seqCounter = 0; order = [];
         showOverlay();
         try {
             chatContainer = findChatContainer();
@@ -545,6 +548,11 @@ main{max-width:980px;margin:0 auto;padding:24px}
             setProgress(T.starting);
             await autoScroll(chatContainer);
             if (cancelled) { setProgress(T.cancelled); return; }
+
+            // Sort all captured messages by their visual Y position — that's
+            // the only signal that reliably matches conversation order in a
+            // virtualized chat.
+            order = buildOrder();
 
             setProgress(T.scrollDone(order.length));
             const imgMap = await downloadAllImages();
