@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.7.0
+// @version      1.8.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.7.0';
+    const VERSION = '1.8.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -105,6 +105,9 @@
         updateInstall: 'Install',
         updateDismiss: 'Dismiss',
         updateBadgeTitle: (v) => `Update available — v${v}. Open settings to install.`,
+        startingNotice: 'Archiving — do not touch the page',
+        resumingNotice: 'Resuming previous archive — do not touch the page',
+        stopArchive: 'Stop archiving',
     };
     const I18N = {
         en: I18N_EN,
@@ -174,6 +177,9 @@
             updateInstall: 'Установить',
             updateDismiss: 'Скрыть',
             updateBadgeTitle: (v) => `Доступна обновлённая версия — v${v}. Открой настройки, чтобы установить.`,
+            startingNotice: 'Архивирую — не трогай страницу',
+            resumingNotice: 'Продолжаю архивацию — не трогай страницу',
+            stopArchive: 'Остановить архивацию',
         },
         de: {
             htmlLang: 'de',
@@ -211,6 +217,9 @@
             historyTitle: 'Letzte Archive',
             historyEmpty: 'Noch keine Archive',
             historyItem: (when, n) => `${when} — ${n} Nachrichten`,
+            startingNotice: 'Archivierung läuft — Seite nicht berühren',
+            resumingNotice: 'Archivierung wird fortgesetzt — Seite nicht berühren',
+            stopArchive: 'Archivierung stoppen',
         },
         fr: {
             htmlLang: 'fr',
@@ -248,6 +257,9 @@
             historyTitle: 'Archives récentes',
             historyEmpty: 'Aucune archive',
             historyItem: (when, n) => `${when} — ${n} messages`,
+            startingNotice: 'Archivage en cours — ne touchez pas à la page',
+            resumingNotice: "Reprise de l'archivage — ne touchez pas à la page",
+            stopArchive: "Arrêter l'archivage",
         },
         es: {
             htmlLang: 'es',
@@ -285,6 +297,9 @@
             historyTitle: 'Archivos recientes',
             historyEmpty: 'Sin archivos aún',
             historyItem: (when, n) => `${when} — ${n} mensajes`,
+            startingNotice: 'Archivando — no toques la página',
+            resumingNotice: 'Reanudando archivo — no toques la página',
+            stopArchive: 'Detener archivado',
         },
     };
     function pickLang() {
@@ -996,6 +1011,8 @@
             textAlign,
             alignSelf,
             len: (text || '').length,
+            // First ~120 chars used to match system-message patterns below.
+            text: (text || '').slice(0, 120),
             hasPre: !!(node.querySelector && node.querySelector('pre')),
             hasH: !!(node.querySelector && node.querySelector('h1,h2,h3,h4,h5,h6')),
             hasList: !!(node.querySelector && node.querySelector('ul,ol')),
@@ -1007,86 +1024,100 @@
 
     // ===== ROLE NORMALIZATION =====
     // Post-capture pass that re-classifies messages when the capture-time
-    // detector failed (typically when Claude Code Web exposes no role
-    // attributes and visual alignment is identical for both sides).
+    // detector failed. STRUCTURE is the primary signal — message length is
+    // intentionally NOT used, because long user prompts (multi-paragraph
+    // instructions) would otherwise be mistaken for assistant output.
     //
-    // Strategy:
-    //   1. If we already have a healthy mix of user / assistant, trust
-    //      the capture-time detection.
-    //   2. Otherwise rebuild roles from cross-message signals:
-    //      - tool calls / markdown structure / code = strong assistant
-    //      - background-color clusters split user vs assistant
-    //      - if no bg differentiation: short plain text = user
-    //   3. As a last guarantee against an all-assistant output, force
-    //      the very first message in chronological order to "user"
-    //      (every Claude Code session starts with a user prompt).
+    // Heuristic:
+    //   - has tool call, <pre>, heading, list or table  → assistant
+    //   - matches a known system-message phrase pattern → assistant
+    //   - anything else                                  → user
+    //   - final guarantee: at least one user must exist  (force first by Y)
+    const SYSTEM_PATTERNS = [
+        // EN
+        /^Session\s+(?:initialized|resumed|started|ended)/i,
+        /^Done\b/i,
+        /^Skipped\b/i,
+        /^Run\s+(?:the\s+)?setup\s+script/i,
+        /^Add\s+(?:a\s+)?(?:setup|configuration)\s+script/i,
+        /^Cloud\s+container\b/i,
+        /^Configure\s+(?:cloud|a)\s+container/i,
+        /^Claude\s+Code\s+started/i,
+        /^Repositor(?:y|ies)\s+cloned/i,
+        // ES
+        /^Sesión\s+(?:inicializada|reanudada|iniciada|finalizada)/i,
+        /^Completado\b/i,
+        /^Omitido\b/i,
+        /^Configurar\s+un\s+contenedor/i,
+        /^Contenedor\s+(?:en\s+la\s+)?nube/i,
+        /^Ejecutar\s+(?:el\s+)?script/i,
+        /^Añade\s+un\s+script/i,
+        /^Claude\s+Code\s+iniciado/i,
+        /^Repositorios?\s+clonados?/i,
+        // RU
+        /^Сессия\s+(?:инициализирована|возобновлена|начата|завершена)/i,
+        /^Готово\b/i,
+        /^Пропущено\b/i,
+        /^Облачный\s+контейнер/i,
+        /^Запустить\s+скрипт/i,
+        /^Добавить\s+скрипт/i,
+        /^Claude\s+Code\s+запущен/i,
+        /^Репозитори[ия]\s+клонирован/i,
+        // DE
+        /^Sitzung\s+(?:initialisiert|wieder\s+aufgenommen|gestartet|beendet)/i,
+        /^Fertig\b/i,
+        /^Übersprungen\b/i,
+        /^Cloud[- ]Container\b/i,
+        /^Setup-Skript\s+ausführen/i,
+        /^Setup-Skript\s+hinzufügen/i,
+        /^Claude\s+Code\s+gestartet/i,
+        /^Repositor(?:y|ies|ien)\s+geklont/i,
+        // FR
+        /^Session\s+(?:initialisée|reprise|démarrée|terminée)/i,
+        /^Terminé\b/i,
+        /^Ignoré\b/i,
+        /^Conteneur\s+(?:cloud|infonuagique)/i,
+        /^Exécuter\s+(?:le\s+)?script/i,
+        /^Ajouter\s+un\s+script/i,
+        /^Claude\s+Code\s+démarré/i,
+        /^Dépôts?\s+clon[éee]s?/i,
+    ];
+
+    function isLikelyAssistant(entry) {
+        if (entry.tool) return true;
+        const s = entry.signals;
+        if (!s) return false;
+        if (s.hasPre || s.hasH || s.hasList || s.hasTable) return true;
+        const head = s.text || '';
+        for (const re of SYSTEM_PATTERNS) {
+            if (re.test(head)) return true;
+        }
+        return false;
+    }
+
     function normalizeRoles() {
         const entries = [...messages.values()];
         if (entries.length < 2) return 0;
 
+        // Skip if we already have a sensible split (user count between
+        // 3% and 70% of total).
         const userCount = entries.filter(e => e.role === 'user').length;
         const total = entries.length;
-        const balanced = userCount >= Math.max(1, Math.floor(total * 0.05))
-                      && userCount <= total - 1;
-        if (balanced) return 0;
+        const tooFew = userCount === 0 || userCount < Math.max(1, Math.floor(total * 0.03));
+        const tooMany = userCount > total * 0.7;
+        if (!tooFew && !tooMany) return 0;
 
         let changed = 0;
-        const isStrongAssistant = (e) => {
-            if (e.tool) return true;
-            const s = e.signals;
-            if (!s) return false;
-            return s.hasPre || s.hasH || s.hasList || s.hasTable;
-        };
-
-        // Step 1: mark every message with a strong assistant signal.
         for (const e of entries) {
-            if (isStrongAssistant(e)) {
-                if (e.role !== 'assistant') { e.role = 'assistant'; changed++; }
-            }
+            const expected = isLikelyAssistant(e) ? 'assistant' : 'user';
+            if (e.role !== expected) { e.role = expected; changed++; }
         }
 
-        // Step 2: differentiate by background-color cluster.
-        const TRANSPARENT_BG = new Set(['', 'transparent', 'rgba(0, 0, 0, 0)', 'rgba(0,0,0,0)']);
-        const bgCount = new Map();
-        for (const e of entries) {
-            const bg = e.signals && e.signals.bg;
-            if (!bg || TRANSPARENT_BG.has(bg)) continue;
-            bgCount.set(bg, (bgCount.get(bg) || 0) + 1);
-        }
-        if (bgCount.size >= 2) {
-            const sorted = [...bgCount.entries()].sort((a, b) => b[1] - a[1]);
-            const majorityBg = sorted[0][0];
-            for (const e of entries) {
-                if (isStrongAssistant(e)) continue;
-                const bg = e.signals && e.signals.bg;
-                if (!bg || TRANSPARENT_BG.has(bg)) continue;
-                if (bg !== majorityBg) {
-                    if (e.role !== 'user') { e.role = 'user'; changed++; }
-                } else {
-                    if (e.role !== 'assistant') { e.role = 'assistant'; changed++; }
-                }
-            }
-        } else {
-            // Step 2b: no color differentiation — use plain-text length
-            // heuristic. Short plain-text-only blocks = user prompts.
-            for (const e of entries) {
-                if (isStrongAssistant(e)) continue;
-                const s = e.signals;
-                if (!s) continue;
-                if (!s.hasPre && !s.hasH && !s.hasList && !s.hasTable && !s.hasImg && s.len < 600) {
-                    if (e.role !== 'user') { e.role = 'user'; changed++; }
-                }
-            }
-        }
-
-        // Step 3: guarantee at least one user message — the conversation
-        // had to start with one.
-        const newUserCount = entries.filter(e => e.role === 'user').length;
-        if (newUserCount === 0) {
+        // Guarantee at least one user message — every session starts with one.
+        if (entries.filter(e => e.role === 'user').length === 0) {
             const first = entries.slice().sort((a, b) => a.y - b.y || a.seq - b.seq)[0];
             if (first) { first.role = 'user'; changed++; }
         }
-
         console.debug('[archiver] normalizeRoles updated', changed, 'of', total, 'messages');
         return changed;
     }
@@ -1580,22 +1611,6 @@ if(collapseBtn){
     // ===== RUN =====
     async function run() {
         if (busy) return;
-        // Resume offer — if there's a recent unfinished archive for this
-        // URL, ask first. If the user declines, drop the snapshot and ask
-        // the normal start-confirmation.
-        const snapshot = loadResumeSnapshot();
-        let resuming = false;
-        if (snapshot) {
-            const minutes = Math.max(1, Math.round((Date.now() - snapshot.ts) / 60000));
-            if (confirm(T.resumePrompt(snapshot.messages.length, minutes))) {
-                resuming = true;
-            } else {
-                clearResumeSnapshot();
-                if (!confirm(T.confirm)) return;
-            }
-        } else {
-            if (!confirm(T.confirm)) return;
-        }
         busy = true; cancelled = false;
         messages.clear(); seqCounter = 0; order = [];
         messagesParent = null;
@@ -1606,18 +1621,21 @@ if(collapseBtn){
         recompileRedact();
         knownKeys = loadKnownKeys();
         onlyNewActiveForRun = !!settings.onlyNew;
-        if (resuming) {
-            // Restore the captured-message map; image map is recomputed.
+        // Auto-resume: if a snapshot exists for this URL, pick up where
+        // we left off — no popup. The brief notice tells the user.
+        const snapshot = loadResumeSnapshot();
+        let resuming = false;
+        if (snapshot && Array.isArray(snapshot.messages) && snapshot.messages.length > 0) {
+            resuming = true;
             for (const [k, v] of snapshot.messages) messages.set(k, v);
             seqCounter = snapshot.seqCounter || messages.size;
-            // Honour the original fast/skip toggles from the snapshot so
-            // the output is consistent with what the user originally chose.
             if (typeof snapshot.fastMode === 'boolean') fastMode = snapshot.fastMode;
             if (typeof snapshot.skipCode === 'boolean') skipCode = snapshot.skipCode;
             syncToggles();
         }
         setArchiveBtnBusy(true);
         showOverlay();
+        showStartNotification(resuming);
         let imgMap = new Map();
         try {
             chatContainer = findChatContainer();
@@ -1700,6 +1718,8 @@ if(collapseBtn){
 .cc-arch-panel button.active{background:#052e1a;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
 .cc-arch-panel button:disabled{opacity:.7;cursor:not-allowed}
 .cc-arch-panel button.busy{background:#0b3a25}
+.cc-arch-panel button.stop{background:#b91c1c;color:#fff}
+.cc-arch-panel button.stop:hover{background:#dc2626}
 .cc-arch-panel button.has-update::after{content:'';position:absolute;top:-2px;right:-2px;width:8px;height:8px;background:#fbbf24;border-radius:50%;border:1px solid #14532d;box-sizing:border-box}
 .cc-arch-spinner{display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:cc-arch-spin 700ms linear infinite}
 @keyframes cc-arch-spin{to{transform:rotate(360deg)}}
@@ -1710,6 +1730,8 @@ if(collapseBtn){
 .cc-arch-panel.collapsed.has-update::after{content:'';position:absolute;top:-2px;right:-2px;width:10px;height:10px;background:#fbbf24;border-radius:50%;border:2px solid #14532d;box-sizing:border-box;display:block !important}
 .cc-arch-update-notice{background:rgba(251,191,36,.16);border:1px solid #fbbf24;color:#fde68a;padding:8px 12px;border-radius:6px;margin:0 0 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px}
 .cc-arch-update-notice button{background:#fbbf24;color:#0f1115;border:none;border-radius:4px;padding:5px 12px;cursor:pointer;font-weight:700;font-size:12px}
+.cc-arch-start-banner{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-30px);background:#16a34a;color:#fff;padding:11px 22px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.5);z-index:2147483647;font:600 13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;opacity:0;transition:opacity .25s ease,transform .25s ease;pointer-events:none;max-width:80vw;text-align:center;white-space:nowrap}
+.cc-arch-start-banner.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .cc-arch-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483646;display:flex;align-items:flex-end;justify-content:center;padding-bottom:90px;pointer-events:none}
 .cc-arch-card{background:#171a21;color:#e6e8eb;border:1px solid #2a2f3a;border-radius:12px;padding:14px 18px;min-width:320px;max-width:80vw;font:14px sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.5);pointer-events:auto;position:relative}
 .cc-arch-card .p{margin-bottom:10px}
@@ -1744,6 +1766,25 @@ if(collapseBtn){
     }
     function hideOverlay() { if (overlay) { overlay.remove(); overlay = null; progressEl = null; } }
 
+    // Non-blocking start notification — replaces the old confirm() dialog.
+    // Auto-dismisses after 3 seconds. Archive starts immediately; the user
+    // can stop via the Archive button (which turns into a Stop button while
+    // the run is in progress).
+    function showStartNotification(resuming) {
+        // Remove any pre-existing banner to avoid stacking.
+        const old = document.querySelector('.cc-arch-start-banner');
+        if (old) old.remove();
+        const banner = document.createElement('div');
+        banner.className = 'cc-arch-start-banner';
+        banner.textContent = resuming ? T.resumingNotice : T.startingNotice;
+        document.body.appendChild(banner);
+        requestAnimationFrame(() => banner.classList.add('show'));
+        setTimeout(() => {
+            banner.classList.remove('show');
+            setTimeout(() => { try { banner.remove(); } catch (_) {} }, 280);
+        }, 3000);
+    }
+
     function setProgress(text, force) {
         if (!progressEl) return;
         pendingProgressText = text;
@@ -1768,18 +1809,20 @@ if(collapseBtn){
 
     function setArchiveBtnBusy(isBusy) {
         if (!archiveBtn) return;
-        archiveBtn.disabled = isBusy;
+        // Stay clickable — a click during a run cancels the archive
+        // (handled in the archive button's onclick, which branches on busy).
+        archiveBtn.disabled = false;
         archiveBtn.classList.toggle('busy', isBusy);
+        archiveBtn.classList.toggle('stop', isBusy);
         if (isBusy) {
-            archiveBtn.innerHTML = `<span class="cc-arch-spinner"></span>`;
-            archiveBtn.title = T.archiving;
+            archiveBtn.innerHTML = `⏹`;
+            archiveBtn.title = T.stopArchive;
             // Keep the panel expanded during the run so the user can see
-            // the progress overlay and reach the Cancel button.
+            // the progress and reach the Stop button.
             expandPanel();
         } else {
             archiveBtn.textContent = '⬇';
             updateArchiveTooltip();
-            // Run is over — let the panel return to its idle circle.
             scheduleCollapse();
         }
     }
@@ -2026,7 +2069,16 @@ if(collapseBtn){
         archiveBtn.type = 'button';
         archiveBtn.id = 'cc-arch-archive';
         archiveBtn.textContent = '⬇';
-        archiveBtn.onclick = run;
+        // Click acts as Start when idle, Stop when a run is in progress —
+        // mirrors the icon swap in setArchiveBtnBusy().
+        archiveBtn.onclick = () => {
+            if (busy) {
+                cancelled = true;
+                setProgress(T.cancelling, true);
+            } else {
+                run();
+            }
+        };
         panel.appendChild(archiveBtn);
 
         fastBtn = document.createElement('button');

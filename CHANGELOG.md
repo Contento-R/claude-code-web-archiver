@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-05-21
+
+### Fixed
+- **Role detection — flipped/wrong labels.** v1.7.0's `normalizeRoles`
+  still used message length as one of the signals (a plain-text block
+  ≥600 chars stayed as assistant), which misclassified long user prompts.
+  It also relied on background-color clustering that picked the wrong
+  cluster when user prompts shared a colour with Claude's most common
+  message style. Detector is now purely **structure-based**:
+  - tool call, `<pre>`, headings, lists or tables → assistant
+  - text matching a multilingual system-message pattern → assistant
+    (covers Spanish / English / Russian / German / French phrases like
+    `Sesión inicializada`, `Session resumed`, `Completado`, `Done`,
+    `Repositorios clonados`, `Claude Code iniciado`, etc.)
+  - anything else → user
+  Length is no longer used — a long plain-text prompt is correctly user.
+  The final guarantee (force the first message to user) still applies.
+
+### Changed
+- **No more blocking start dialog.** The old `confirm()` (`The archiver
+  will scroll the ENTIRE session…`) is gone. Clicking Archive (or
+  pressing `Alt+A`) starts the run immediately. A non-blocking green
+  banner appears at the top of the page for 3 s explaining the run; if
+  the user has an unfinished snapshot, the banner reads "Resuming…"
+  instead and the run picks up from where it stopped (auto-resume).
+- **Archive button doubles as Stop.** During a run the button switches
+  to a red ⏹ icon and "Stop archiving" tooltip; clicking it cancels.
+  Stays clickable the whole time — no more disabled state with spinner.
+
+### Notes
+- `T.confirm` and `T.resumePrompt` strings are kept in the i18n dictionary
+  for now (unused) so out-of-tree translations don't error.
+
 ## [1.7.0] - 2026-05-21
 
 ### Fixed (critical)
