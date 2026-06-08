@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.1.6
-// @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Bilingual UI (EN/RU) auto-selected from the browser locale.
-// @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU по локали браузера.
+// @version      1.2.0
+// @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
+// @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
 // @license      MIT
 // @homepageURL  https://github.com/Contento-R/claude-code-web-archiver
 // @supportURL   https://github.com/Contento-R/claude-code-web-archiver/issues
+// @updateURL    https://raw.githubusercontent.com/Contento-R/claude-code-web-archiver/main/claude-code-web-archiver.user.js
+// @downloadURL  https://raw.githubusercontent.com/Contento-R/claude-code-web-archiver/main/claude-code-web-archiver.user.js
 // @match        https://code.claude.com/*
 // @match        https://claude.ai/code
 // @match        https://claude.ai/code/*
@@ -31,42 +33,50 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.1.6';
+    const VERSION = '1.2.0';
 
     // ===== I18N =====
+    // Default English dictionary; other locales fall back to English for
+    // missing keys via the proxy in pickT().
+    const I18N_EN = {
+        htmlLang: 'en',
+        confirm: 'The archiver will automatically scroll through the ENTIRE session, expand collapsed blocks, and download screenshots.\n\nDo not touch the page during the process. Continue?',
+        noContainer: 'Chat container not found.',
+        starting: 'Starting... scrolling to the top of the session.',
+        scrolling: (n) => `Scrolling & capturing... messages: ${n}`,
+        scrollDone: (n) => `Scrolling complete. Messages: ${n}. Downloading screenshots...`,
+        downloading: (d, t, ok) => `Downloading screenshots... ${d}/${t} (${ok} ok)`,
+        embedded: (ok, t) => `Screenshots: ${ok}/${t} embedded.`,
+        building: 'Building HTML...',
+        done: (n, m) => `Done! Messages: ${n}, images embedded: ${m}.`,
+        cancelled: 'Cancelled.',
+        cancelling: 'Cancelling...',
+        startingShort: 'Starting...',
+        error: 'Error: ',
+        archive: 'Archive',
+        archiving: 'Archiving...',
+        fast: 'Fast',
+        noCode: 'No code',
+        cancel: 'Cancel',
+        archiveTitle: 'Archive session — capture all messages and screenshots into one HTML file',
+        fastTitleOn: 'Fast mode is ON — delays minimized, downloads parallel',
+        fastTitleOff: 'Fast mode is OFF — click to minimize delays and parallelize downloads',
+        noCodeTitleOn: 'Skip code blocks is ON — only the conversation will be exported',
+        noCodeTitleOff: 'Skip code blocks is OFF — click to exclude code blocks Claude writes',
+        dragTitle: 'Drag the panel',
+        userLabel: 'User',
+        assistantLabel: 'Claude',
+        archivedLabel: 'Archived',
+        messagesLabel: 'Messages',
+        sourceLabel: 'Source',
+        parserLabel: 'Parser',
+        hotkeysHint: 'Hotkeys: Alt+A archive, Esc cancel',
+        historyTitle: 'Recent archives',
+        historyEmpty: 'No archives yet',
+        historyItem: (when, n) => `${when} — ${n} messages`,
+    };
     const I18N = {
-        en: {
-            htmlLang: 'en',
-            confirm: 'The archiver will automatically scroll through the ENTIRE session, expand collapsed blocks, and download screenshots.\n\nDo not touch the page during the process. Continue?',
-            noContainer: 'Chat container not found.',
-            starting: 'Starting... scrolling to the top of the session.',
-            scrolling: (n) => `Scrolling & capturing... messages: ${n}`,
-            scrollDone: (n) => `Scrolling complete. Messages: ${n}. Downloading screenshots...`,
-            downloading: (d, t, ok) => `Downloading screenshots... ${d}/${t} (${ok} ok)`,
-            embedded: (ok, t) => `Screenshots: ${ok}/${t} embedded.`,
-            building: 'Building HTML...',
-            done: (n, m) => `Done! Messages: ${n}, images embedded: ${m}.`,
-            cancelled: 'Cancelled.',
-            cancelling: 'Cancelling...',
-            startingShort: 'Starting...',
-            error: 'Error: ',
-            archive: 'Archive',
-            fast: 'Fast',
-            noCode: 'No code',
-            cancel: 'Cancel',
-            archiveTitle: 'Archive session — capture all messages and screenshots into one HTML file',
-            fastTitleOn: 'Fast mode is ON — delays minimized, downloads parallel',
-            fastTitleOff: 'Fast mode is OFF — click to minimize delays and parallelize downloads',
-            noCodeTitleOn: 'Skip code blocks is ON — only the conversation will be exported',
-            noCodeTitleOff: 'Skip code blocks is OFF — click to exclude code blocks Claude writes',
-            dragTitle: 'Drag the panel',
-            userLabel: 'User',
-            assistantLabel: 'Claude',
-            archivedLabel: 'Archived',
-            messagesLabel: 'Messages',
-            sourceLabel: 'Source',
-            parserLabel: 'Parser',
-        },
+        en: I18N_EN,
         ru: {
             htmlLang: 'ru',
             confirm: 'Архиватор прокрутит ВСЮ сессию автоматически, развернёт свёрнутые блоки и скачает скриншоты.\n\nНе трогай страницу во время процесса. Продолжить?',
@@ -83,6 +93,7 @@
             startingShort: 'Старт…',
             error: 'Ошибка: ',
             archive: 'Архив',
+            archiving: 'Архивирую…',
             fast: 'Быстро',
             noCode: 'Без кода',
             cancel: 'Отмена',
@@ -98,13 +109,144 @@
             messagesLabel: 'Сообщений',
             sourceLabel: 'Источник',
             parserLabel: 'Парсер',
+            hotkeysHint: 'Горячие клавиши: Alt+A — архив, Esc — отмена',
+            historyTitle: 'Последние архивы',
+            historyEmpty: 'Архивов пока нет',
+            historyItem: (when, n) => `${when} — сообщений: ${n}`,
+        },
+        de: {
+            htmlLang: 'de',
+            confirm: 'Der Archivierer scrollt die GESAMTE Sitzung automatisch durch, klappt eingeklappte Blöcke auf und lädt Screenshots herunter.\n\nBerühre die Seite während des Vorgangs nicht. Fortfahren?',
+            noContainer: 'Chat-Container nicht gefunden.',
+            starting: 'Starte … scrolle zum Anfang der Sitzung.',
+            scrolling: (n) => `Scrolle und erfasse … Nachrichten: ${n}`,
+            scrollDone: (n) => `Scrollen abgeschlossen. Nachrichten: ${n}. Lade Screenshots …`,
+            downloading: (d, t, ok) => `Lade Screenshots … ${d}/${t} (${ok} ok)`,
+            embedded: (ok, t) => `Screenshots: ${ok}/${t} eingebettet.`,
+            building: 'Baue HTML …',
+            done: (n, m) => `Fertig! Nachrichten: ${n}, eingebettete Bilder: ${m}.`,
+            cancelled: 'Abgebrochen.',
+            cancelling: 'Breche ab …',
+            startingShort: 'Start …',
+            error: 'Fehler: ',
+            archive: 'Archivieren',
+            archiving: 'Archiviere …',
+            fast: 'Schnell',
+            noCode: 'Ohne Code',
+            cancel: 'Abbrechen',
+            archiveTitle: 'Sitzung archivieren — alle Nachrichten und Screenshots in eine HTML-Datei',
+            fastTitleOn: 'Schnellmodus AN — Verzögerungen minimiert, parallele Downloads',
+            fastTitleOff: 'Schnellmodus AUS — klicken, um Verzögerungen zu minimieren',
+            noCodeTitleOn: 'Code überspringen AN — nur die Konversation wird exportiert',
+            noCodeTitleOff: 'Code überspringen AUS — klicken, um Code-Blöcke auszuschließen',
+            dragTitle: 'Panel ziehen',
+            userLabel: 'Benutzer',
+            assistantLabel: 'Claude',
+            archivedLabel: 'Archiviert',
+            messagesLabel: 'Nachrichten',
+            sourceLabel: 'Quelle',
+            parserLabel: 'Parser',
+            hotkeysHint: 'Tastenkürzel: Alt+A archivieren, Esc abbrechen',
+            historyTitle: 'Letzte Archive',
+            historyEmpty: 'Noch keine Archive',
+            historyItem: (when, n) => `${when} — ${n} Nachrichten`,
+        },
+        fr: {
+            htmlLang: 'fr',
+            confirm: "L'archiveur fera défiler TOUTE la session automatiquement, dépliera les blocs réduits et téléchargera les captures.\n\nNe touchez pas à la page pendant le processus. Continuer ?",
+            noContainer: 'Conteneur de chat introuvable.',
+            starting: 'Démarrage… défilement vers le début de la session.',
+            scrolling: (n) => `Défilement et capture… messages : ${n}`,
+            scrollDone: (n) => `Défilement terminé. Messages : ${n}. Téléchargement des captures…`,
+            downloading: (d, t, ok) => `Téléchargement des captures… ${d}/${t} (${ok} ok)`,
+            embedded: (ok, t) => `Captures : ${ok}/${t} intégrées.`,
+            building: 'Construction du HTML…',
+            done: (n, m) => `Terminé ! Messages : ${n}, images intégrées : ${m}.`,
+            cancelled: 'Annulé.',
+            cancelling: 'Annulation…',
+            startingShort: 'Démarrage…',
+            error: 'Erreur : ',
+            archive: 'Archiver',
+            archiving: 'Archivage…',
+            fast: 'Rapide',
+            noCode: 'Sans code',
+            cancel: 'Annuler',
+            archiveTitle: 'Archiver la session — capturer tous les messages et captures dans un HTML',
+            fastTitleOn: 'Mode rapide ACTIVÉ — délais minimisés, téléchargements parallèles',
+            fastTitleOff: 'Mode rapide DÉSACTIVÉ — cliquez pour accélérer',
+            noCodeTitleOn: 'Sans code ACTIVÉ — seule la conversation sera exportée',
+            noCodeTitleOff: 'Sans code DÉSACTIVÉ — cliquez pour exclure le code',
+            dragTitle: 'Déplacer le panneau',
+            userLabel: 'Utilisateur',
+            assistantLabel: 'Claude',
+            archivedLabel: 'Archivé',
+            messagesLabel: 'Messages',
+            sourceLabel: 'Source',
+            parserLabel: 'Analyseur',
+            hotkeysHint: 'Raccourcis : Alt+A archiver, Esc annuler',
+            historyTitle: 'Archives récentes',
+            historyEmpty: 'Aucune archive',
+            historyItem: (when, n) => `${when} — ${n} messages`,
+        },
+        es: {
+            htmlLang: 'es',
+            confirm: 'El archivador desplazará TODA la sesión automáticamente, expandirá los bloques contraídos y descargará las capturas.\n\nNo toques la página durante el proceso. ¿Continuar?',
+            noContainer: 'Contenedor de chat no encontrado.',
+            starting: 'Iniciando… desplazándose al principio de la sesión.',
+            scrolling: (n) => `Desplazando y capturando… mensajes: ${n}`,
+            scrollDone: (n) => `Desplazamiento completo. Mensajes: ${n}. Descargando capturas…`,
+            downloading: (d, t, ok) => `Descargando capturas… ${d}/${t} (${ok} ok)`,
+            embedded: (ok, t) => `Capturas: ${ok}/${t} incrustadas.`,
+            building: 'Construyendo HTML…',
+            done: (n, m) => `¡Listo! Mensajes: ${n}, imágenes incrustadas: ${m}.`,
+            cancelled: 'Cancelado.',
+            cancelling: 'Cancelando…',
+            startingShort: 'Iniciando…',
+            error: 'Error: ',
+            archive: 'Archivar',
+            archiving: 'Archivando…',
+            fast: 'Rápido',
+            noCode: 'Sin código',
+            cancel: 'Cancelar',
+            archiveTitle: 'Archivar sesión — capturar todos los mensajes y capturas en un HTML',
+            fastTitleOn: 'Modo rápido ACTIVADO — demoras minimizadas, descargas paralelas',
+            fastTitleOff: 'Modo rápido DESACTIVADO — haga clic para acelerar',
+            noCodeTitleOn: 'Sin código ACTIVADO — solo se exportará la conversación',
+            noCodeTitleOff: 'Sin código DESACTIVADO — haga clic para excluir el código',
+            dragTitle: 'Arrastrar el panel',
+            userLabel: 'Usuario',
+            assistantLabel: 'Claude',
+            archivedLabel: 'Archivado',
+            messagesLabel: 'Mensajes',
+            sourceLabel: 'Fuente',
+            parserLabel: 'Analizador',
+            hotkeysHint: 'Atajos: Alt+A archivar, Esc cancelar',
+            historyTitle: 'Archivos recientes',
+            historyEmpty: 'Sin archivos aún',
+            historyItem: (when, n) => `${when} — ${n} mensajes`,
         },
     };
     function pickLang() {
         const l = (navigator.language || 'en').toLowerCase();
-        return l.startsWith('ru') ? 'ru' : 'en';
+        if (l.startsWith('ru')) return 'ru';
+        if (l.startsWith('de')) return 'de';
+        if (l.startsWith('fr')) return 'fr';
+        if (l.startsWith('es')) return 'es';
+        return 'en';
     }
-    const T = I18N[pickLang()];
+    // Proxy: undefined keys in the chosen locale fall back to the English
+    // dictionary so partial translations never break the UI.
+    function pickT() {
+        const lang = pickLang();
+        const dict = I18N[lang] || I18N.en;
+        return new Proxy(dict, {
+            get(target, prop) {
+                if (prop in target) return target[prop];
+                return I18N_EN[prop];
+            },
+        });
+    }
+    const T = pickT();
 
     // ===== CONFIG =====
     const CFG_NORMAL = {
@@ -135,14 +277,66 @@
     let cancelled = false;
     let fastMode = false;
     let skipCode = false;
-    // key -> { html, role, y, seq }
     const messages = new Map();
     let seqCounter = 0;
     let order = [];
     let chatContainer = null;
-    let messagesParent = null;        // cached parent that holds message nodes
-    let seenNodes = new WeakSet();    // DOM nodes we've already extracted text from
+    let messagesParent = null;
+    let seenNodes = new WeakSet();
     const cfg = () => (fastMode ? CFG_FAST : CFG_NORMAL);
+
+    // ===== ARCHIVE HISTORY =====
+    const HISTORY_KEY = 'cc-arch-history';
+    const HISTORY_MAX = 10;
+    function loadHistory() {
+        try {
+            const raw = localStorage.getItem(HISTORY_KEY);
+            const arr = raw ? JSON.parse(raw) : [];
+            return Array.isArray(arr) ? arr : [];
+        } catch (_) { return []; }
+    }
+    function saveHistory(arr) {
+        try { localStorage.setItem(HISTORY_KEY, JSON.stringify(arr.slice(0, HISTORY_MAX))); } catch (_) {}
+    }
+    function recordArchive(messageCount, imageCount) {
+        const arr = loadHistory();
+        arr.unshift({
+            url: location.href,
+            title: getTitle().slice(0, 120),
+            at: Date.now(),
+            messages: messageCount,
+            images: imageCount,
+            version: VERSION,
+        });
+        saveHistory(arr);
+        updateArchiveTooltip();
+    }
+    function formatRelative(ms) {
+        const now = Date.now();
+        const diff = Math.max(0, now - ms);
+        const s = Math.floor(diff / 1000);
+        if (s < 60) return s + 's ago';
+        const m = Math.floor(s / 60);
+        if (m < 60) return m + 'm ago';
+        const h = Math.floor(m / 60);
+        if (h < 24) return h + 'h ago';
+        const d = Math.floor(h / 24);
+        return d + 'd ago';
+    }
+    function buildHistoryTooltip() {
+        const items = loadHistory();
+        if (items.length === 0) return T.archiveTitle + '\n\n' + T.historyTitle + ': ' + T.historyEmpty;
+        const lines = [T.archiveTitle, '', T.historyTitle + ':'];
+        for (let i = 0; i < Math.min(3, items.length); i++) {
+            const it = items[i];
+            lines.push('• ' + T.historyItem(formatRelative(it.at), it.messages || 0));
+        }
+        lines.push('', T.hotkeysHint);
+        return lines.join('\n');
+    }
+    function updateArchiveTooltip() {
+        if (archiveBtn) archiveBtn.title = buildHistoryTooltip();
+    }
 
     // ===== SMALL UTILS =====
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -159,8 +353,6 @@
     function findChatContainer() {
         const main = document.querySelector('main') || document.body;
         let best = main, bestArea = 0;
-        // querySelectorAll('*') is unavoidable here, but it only runs once per
-        // archive run, so the one-time cost is acceptable.
         for (const el of main.querySelectorAll('*')) {
             const cs = getComputedStyle(el);
             if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
@@ -172,9 +364,6 @@
         return best;
     }
 
-    // Locate the wrapper that holds individual message nodes, then cache it.
-    // The wrapper is stable for the lifetime of the chat — drilling 12 levels
-    // deep on every scroll step (as v1.1.5 did) is pure waste.
     function ensureMessagesParent(container) {
         if (messagesParent && messagesParent.isConnected) return messagesParent;
         const min = cfg().minTextLen;
@@ -195,15 +384,12 @@
         const min = cfg().minTextLen;
         const out = [];
         for (const c of parent.children) {
-            // textContent doesn't force layout; innerText does. We only need
-            // length here, so textContent is both faster and correct.
             const t = c.textContent;
             if (!t || t.length <= min) continue;
             if (t.trim().length <= min) continue;
             out.push(c);
         }
         if (out.length >= 2) return out;
-        // Fallback for unusual layouts.
         return Array.from(parent.querySelectorAll(':scope > * > *'))
             .filter(c => ((c.textContent || '').trim().length > min));
     }
@@ -218,10 +404,6 @@
         'data-sender',
         'data-from',
     ];
-    // Word-bounded keyword sets. "you" was deliberately removed — it appears
-    // in almost every assistant message ("you can...", "if you...") and caused
-    // huge false-positive rates. Same for "ai", "bot", "response" which are
-    // too common in CSS/test ids to be reliable signals.
     const USER_RE = /(^|[\s"'_./:-])(user|human|user[_-]?message|user[_-]?prompt)([\s"'_./:-]|$)/i;
     const ASSISTANT_RE = /(^|[\s"'_./:-])(assistant|claude|agent|assistant[_-]?message)([\s"'_./:-]|$)/i;
     function classifyRoleString(s) {
@@ -245,17 +427,11 @@
     }
     function classOf(el) {
         if (!el || !el.getAttribute) return '';
-        // For SVG elements `className` is SVGAnimatedString, not a string;
-        // getAttribute is always a string or null.
         return el.getAttribute('class') || '';
     }
     function guessRole(node) {
-        // 1) Explicit role attributes on the node itself.
         let r = roleFromAttrs(node);
         if (r) return r;
-
-        // 2) Walk ancestors up to chatContainer; UI often puts role on a
-        //    wrapper several levels above. Cap depth to 10.
         for (let p = node.parentElement, i = 0; p && i < 10; p = p.parentElement, i++) {
             if (p === chatContainer) break;
             r = roleFromAttrs(p);
@@ -263,8 +439,6 @@
             const cs = classifyRoleString(classOf(p));
             if (cs) return cs;
         }
-
-        // 3) A bounded sweep inside the node — first match wins.
         if (node.querySelectorAll) {
             const sel = ROLE_ATTRS.map(a => `[${a}]`).join(',') + ',[data-testid],[aria-label]';
             const list = node.querySelectorAll(sel);
@@ -273,14 +447,8 @@
                 if (r) return r;
             }
         }
-
-        // 4) Class names on the node itself. Crucially we DO NOT scan the
-        //    raw outerHTML text (v1.1.5 bug) — that matched user/Claude words
-        //    in actual message prose and mislabelled messages.
         r = classifyRoleString(classOf(node));
         if (r) return r;
-
-        // 5) Visual alignment on the live node and its first child.
         try {
             const cs = getComputedStyle(node);
             if (cs.alignSelf === 'flex-end' || cs.alignSelf === 'end') return 'user';
@@ -296,8 +464,6 @@
                 if (cs.justifyContent === 'flex-end' || cs.justifyContent === 'end') return 'user';
             }
         } catch (e) { /* ignore */ }
-
-        // 6) Geometric fallback.
         try {
             const rect = node.getBoundingClientRect();
             const parent = node.parentElement;
@@ -308,10 +474,7 @@
                 if (leftGap > 80 && leftGap > rightGap * 1.5) return 'user';
             }
         } catch (e) { /* ignore */ }
-
-        // 7) Legacy Tailwind hints (last resort, checked against class only).
         if (/ml-auto|justify-end|items-end|text-right|self-end/i.test(classOf(node))) return 'user';
-
         return 'assistant';
     }
 
@@ -349,7 +512,6 @@
         if (!liveNode || !liveNode.querySelectorAll) return 0;
         const toRemove = new Set();
         clone.querySelectorAll(CODE_SELECTORS).forEach(e => toRemove.add(e));
-
         const liveAll = [liveNode, ...liveNode.querySelectorAll('*')];
         const cloneAll = [clone, ...clone.querySelectorAll('*')];
         if (liveAll.length === cloneAll.length) {
@@ -372,7 +534,6 @@
                 }
             }
         }
-
         let removed = 0;
         for (const e of toRemove) {
             let p = e.parentElement, nested = false;
@@ -414,8 +575,6 @@
     }
 
     // ===== EXPAND DISCLOSURE ELEMENTS IN VIEW =====
-    // Only act on widgets that are actually within (or near) the viewport, so
-    // we don't sledgehammer the whole chat tree on every scroll step.
     async function expandInView(container) {
         const detailsToOpen = [];
         if (!skipCode) {
@@ -423,12 +582,10 @@
                 if (inViewport(d.getBoundingClientRect())) detailsToOpen.push(d);
             }
         }
-        // Synchronous batch open — no per-item wait needed.
         for (const d of detailsToOpen) {
             if (cancelled) return;
             try { d.open = true; } catch (_) {}
         }
-
         const ariaToClick = [];
         for (const el of container.querySelectorAll('[aria-expanded="false"]')) {
             if (inViewport(el.getBoundingClientRect())) ariaToClick.push(el);
@@ -448,8 +605,6 @@
         const nodes = getMessageNodes();
         const min = cfg().minTextLen;
         for (const node of nodes) {
-            // Skip nodes we've already extracted to avoid recomputing text
-            // and Y for unchanged messages.
             if (seenNodes.has(node)) continue;
             const text = (node.textContent || '').trim();
             if (text.length < min) continue;
@@ -480,13 +635,11 @@
     async function autoScroll(container) {
         container.scrollTop = 0;
         await sleep(cfg().scrollWaitMs * 1.5);
-
         let lastTop = -1, stable = 0, steps = 0;
         while (!cancelled && steps < cfg().maxSteps) {
             await expandInView(container);
             captureVisible(container);
             setProgress(T.scrolling(messages.size));
-
             const top = container.scrollTop;
             const atBottom = top + container.clientHeight >= container.scrollHeight - 4;
             if (top === lastTop || atBottom) {
@@ -500,7 +653,6 @@
             steps++;
             await sleep(cfg().scrollWaitMs);
         }
-        // Final sweep, force-flush progress.
         await expandInView(container);
         captureVisible(container);
         setProgress(T.scrolling(messages.size), true);
@@ -515,7 +667,6 @@
             fr.readAsDataURL(blob);
         });
     }
-
     function gmGet(url) {
         return new Promise((res, rej) => {
             if (typeof GM_xmlhttpRequest === 'undefined') return rej(new Error('GM_xmlhttpRequest unavailable'));
@@ -527,7 +678,6 @@
             });
         });
     }
-
     async function urlToDataURL(url) {
         if (!url || url.startsWith('data:')) return url || null;
         try {
@@ -539,7 +689,6 @@
         } catch (_) { /* fall through */ }
         return null;
     }
-
     function collectImageUrls() {
         const set = new Set();
         for (const k of order) {
@@ -554,7 +703,6 @@
         }
         return [...set];
     }
-
     async function downloadAllImages() {
         const urls = collectImageUrls();
         const total = urls.length;
@@ -562,7 +710,6 @@
         let done = 0, ok = 0, idx = 0;
         const conc = Math.max(1, Math.min(cfg().concurrency, total || 1));
         setProgress(T.downloading(0, total, 0), true);
-
         async function worker() {
             while (!cancelled) {
                 const i = idx++;
@@ -602,7 +749,6 @@
                 `<div class="body">${tmp.innerHTML}</div></section>`
             );
         }
-
         const css = `
 :root{--bg:#0f1115;--card:#171a21;--user:#1e2a3a;--text:#e6e8eb;--muted:#9aa4b2;--accent:#6ea8fe;--code:#0b0d12;--border:#2a2f3a}
 *{box-sizing:border-box}
@@ -645,7 +791,6 @@ main{max-width:980px;margin:0 auto;padding:24px}
         const safe = getTitle().replace(/[^\wÀ-ÿĀ-�\s\-]/g, '_').replace(/\s+/g, '_').slice(0, 80);
         a.download = (safe || 'claude-code-session') + '.' + ext;
         document.body.appendChild(a); a.click(); a.remove();
-        // Defer revocation so slow browsers actually start the download first.
         setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
 
@@ -657,37 +802,37 @@ main{max-width:980px;margin:0 auto;padding:24px}
         messages.clear(); seqCounter = 0; order = [];
         messagesParent = null;
         seenNodes = new WeakSet();
+        setArchiveBtnBusy(true);
         showOverlay();
+        let imgMap = new Map();
         try {
             chatContainer = findChatContainer();
             if (!chatContainer) { alert(T.noContainer); return; }
-
             setProgress(T.starting, true);
             await autoScroll(chatContainer);
             if (cancelled) { setProgress(T.cancelled, true); return; }
-
             order = buildOrder();
-
             setProgress(T.scrollDone(order.length), true);
-            const imgMap = await downloadAllImages();
+            imgMap = await downloadAllImages();
             if (cancelled) { setProgress(T.cancelled, true); return; }
-
             setProgress(T.building, true);
             const html = buildHtml(imgMap);
             download(html, 'html', 'text/html;charset=utf-8');
             setProgress(T.done(order.length, imgMap.size), true);
+            recordArchive(order.length, imgMap.size);
             await sleep(1500);
         } catch (e) {
             console.error('[archiver]', e);
             alert(T.error + (e.message || e));
         } finally {
             busy = false;
+            setArchiveBtnBusy(false);
             hideOverlay();
         }
     }
 
     // ===== UI =====
-    let overlay, progressEl, panel, fastBtn, noCodeBtn;
+    let overlay, progressEl, panel, archiveBtn, fastBtn, noCodeBtn;
     let pendingProgressText = null;
     let lastProgressFlush = 0;
 
@@ -702,7 +847,10 @@ main{max-width:980px;margin:0 auto;padding:24px}
 .cc-arch-panel button{background:rgba(255,255,255,.14);color:#fff;border:none;border-radius:5px;height:24px;padding:0 8px;margin:1px;cursor:pointer;font:inherit;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .cc-arch-panel button:hover{background:rgba(255,255,255,.26)}
 .cc-arch-panel button.active{background:#052e1a;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
-.cc-arch-panel button:disabled{opacity:.6;cursor:not-allowed}
+.cc-arch-panel button:disabled{opacity:.7;cursor:not-allowed}
+.cc-arch-panel button.busy{background:#0b3a25}
+.cc-arch-spinner{display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:cc-arch-spin 700ms linear infinite}
+@keyframes cc-arch-spin{to{transform:rotate(360deg)}}
 .cc-arch-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483646;display:flex;align-items:flex-end;justify-content:center;padding-bottom:90px;pointer-events:none}
 .cc-arch-card{background:#171a21;color:#e6e8eb;border:1px solid #2a2f3a;border-radius:12px;padding:14px 18px;min-width:320px;max-width:80vw;font:14px sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.5);pointer-events:auto;position:relative}
 .cc-arch-card .p{margin-bottom:10px}
@@ -723,9 +871,6 @@ main{max-width:980px;margin:0 auto;padding:24px}
     }
     function hideOverlay() { if (overlay) { overlay.remove(); overlay = null; progressEl = null; } }
 
-    // Throttled progress writer. Inner loop calls this dozens of times per
-    // second; only flush to the DOM once every `progressThrottleMs` (or
-    // immediately when `force` is true, for terminal messages).
     function setProgress(text, force) {
         if (!progressEl) return;
         pendingProgressText = text;
@@ -748,10 +893,75 @@ main{max-width:980px;margin:0 auto;padding:24px}
         }
     }
 
+    function setArchiveBtnBusy(isBusy) {
+        if (!archiveBtn) return;
+        archiveBtn.disabled = isBusy;
+        archiveBtn.classList.toggle('busy', isBusy);
+        archiveBtn.innerHTML = isBusy
+            ? `<span class="cc-arch-spinner"></span> <span>${esc(T.archiving)}</span>`
+            : `⬇ <span>${esc(T.archive)}</span>`;
+    }
+
+    // ===== KEEP THE PANEL ON-SCREEN =====
+    // When the window is resized / minimized / restored, or the visual
+    // viewport changes (mobile keyboard, zoom, browser chrome appearing),
+    // a panel that was positioned with explicit left/top may end up off
+    // screen. Clamp it to viewport bounds and persist the new position.
+    function clampPanelToViewport() {
+        if (!panel || !panel.isConnected) return;
+        // Panels still in the default bottom-right corner have right:20px
+        // and bottom:20px — that's always visible, no clamping needed.
+        const usingExplicit = panel.style.left && panel.style.top &&
+            panel.style.right === 'auto' && panel.style.bottom === 'auto';
+        if (!usingExplicit) return;
+        const w = panel.offsetWidth || 0;
+        const h = panel.offsetHeight || 0;
+        if (w === 0 || h === 0) return;
+        // Use visualViewport when available so we account for mobile
+        // pinch-zoom and on-screen keyboards correctly.
+        const vw = (window.visualViewport && window.visualViewport.width) || window.innerWidth;
+        const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+        const maxLeft = Math.max(0, vw - w);
+        const maxTop = Math.max(0, vh - h);
+        let left = parseFloat(panel.style.left);
+        let top = parseFloat(panel.style.top);
+        if (!Number.isFinite(left)) left = panel.getBoundingClientRect().left;
+        if (!Number.isFinite(top)) top = panel.getBoundingClientRect().top;
+        const clampedLeft = Math.max(0, Math.min(maxLeft, left));
+        const clampedTop = Math.max(0, Math.min(maxTop, top));
+        if (clampedLeft !== left || clampedTop !== top) {
+            panel.style.left = clampedLeft + 'px';
+            panel.style.top = clampedTop + 'px';
+            try {
+                localStorage.setItem('cc-arch-pos', JSON.stringify({
+                    left: panel.style.left,
+                    top: panel.style.top,
+                }));
+            } catch (_) { /* ignore */ }
+        }
+    }
+    function installViewportWatchers() {
+        if (installViewportWatchers._done) return;
+        installViewportWatchers._done = true;
+        // rAF-coalesced: many resize events can fire in quick succession.
+        let scheduled = false;
+        const schedule = () => {
+            if (scheduled) return;
+            scheduled = true;
+            requestAnimationFrame(() => {
+                scheduled = false;
+                clampPanelToViewport();
+            });
+        };
+        window.addEventListener('resize', schedule, { passive: true });
+        window.addEventListener('orientationchange', schedule, { passive: true });
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', schedule, { passive: true });
+            window.visualViewport.addEventListener('scroll', schedule, { passive: true });
+        }
+    }
+
     // ===== DRAGGING =====
-    // Listeners on document are installed ONCE for the whole script's lifetime.
-    // Previous versions re-installed them every time the panel was rebuilt,
-    // leaking pointermove/pointerup handlers indefinitely.
     let dragState = null;
     function installGlobalDragListeners() {
         if (installGlobalDragListeners._done) return;
@@ -777,7 +987,6 @@ main{max-width:980px;margin:0 auto;padding:24px}
         document.addEventListener('pointerup', endDrag, { passive: true });
         document.addEventListener('pointercancel', endDrag, { passive: true });
     }
-
     function makeDraggable(p, handle) {
         handle.addEventListener('pointerdown', (e) => {
             const rect = p.getBoundingClientRect();
@@ -817,9 +1026,8 @@ main{max-width:980px;margin:0 auto;padding:24px}
         drag.title = T.dragTitle;
         panel.appendChild(drag);
 
-        const archiveBtn = document.createElement('button');
+        archiveBtn = document.createElement('button');
         archiveBtn.type = 'button';
-        archiveBtn.title = T.archiveTitle;
         archiveBtn.innerHTML = `⬇ <span>${esc(T.archive)}</span>`;
         archiveBtn.onclick = run;
         panel.appendChild(archiveBtn);
@@ -839,11 +1047,14 @@ main{max-width:980px;margin:0 auto;padding:24px}
         document.body.appendChild(panel);
         makeDraggable(panel, drag);
         syncToggles();
+        updateArchiveTooltip();
+        // Saved position from a previous (possibly larger) window may now be
+        // off-screen; clamp on next animation frame after the panel has been
+        // measured.
+        requestAnimationFrame(clampPanelToViewport);
     }
 
-    // Keep the panel alive across SPA-style re-renders. MutationObserver on
-    // <body> is event-driven; the v1.1.5 setInterval polled every 2s for no
-    // good reason.
+    // Keep the panel alive across SPA-style re-renders.
     let panelObserver = null;
     function installPanelKeepalive() {
         if (panelObserver) return;
@@ -856,9 +1067,35 @@ main{max-width:980px;margin:0 auto;padding:24px}
         }
     }
 
+    // ===== HOTKEYS =====
+    // Alt+A — start archive. Esc — cancel an ongoing run.
+    function installHotkeys() {
+        if (installHotkeys._done) return;
+        installHotkeys._done = true;
+        window.addEventListener('keydown', (e) => {
+            if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'a' || e.key === 'A')) {
+                // Skip when the user is typing in an editable area unrelated to us.
+                const t = e.target;
+                const isEditable = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || (t.isContentEditable));
+                if (isEditable) return;
+                if (busy) return;
+                e.preventDefault();
+                run();
+                return;
+            }
+            if (e.key === 'Escape' && busy) {
+                cancelled = true;
+                setProgress(T.cancelling, true);
+                e.preventDefault();
+            }
+        }, true);
+    }
+
     function init() {
         addStyles();
         installGlobalDragListeners();
+        installViewportWatchers();
+        installHotkeys();
         makePanel();
         installPanelKeepalive();
     }

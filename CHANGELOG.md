@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-05-21
+
+### Added
+- **Hotkeys.** `Alt+A` triggers archive from anywhere, `Esc` cancels an
+  ongoing run. Skipped inside text inputs / contenteditable so it doesn't
+  interfere with typing.
+- **Auto-update via `@updateURL` / `@downloadURL`.** Tampermonkey will pick
+  up new releases automatically once the script is merged to `main`.
+- **Busy state on the Archive button.** During a run the button is disabled
+  and shows a spinner with the localized "Archiving…" label, preventing
+  double-starts.
+- **Archive history tooltip.** Hovering the Archive button now shows the
+  last few archive runs from `localStorage` with relative timestamps.
+- **Locales DE / FR / ES.** Auto-selected from `navigator.language` alongside
+  EN / RU. Missing translations transparently fall back to English via a
+  Proxy over the locale dict.
+- **CI smoke test.** GitHub Actions workflow runs `node --check` on the
+  userscript and validates the `==UserScript==` metadata block on every
+  push and PR to `main`.
+- **Panel stays on-screen on window resize.** Window resize, orientation
+  change, and visualViewport changes (mobile keyboard, pinch-zoom) all
+  trigger a rAF-coalesced clamp that keeps the panel within viewport
+  bounds and persists the corrected position to `localStorage`. The panel
+  remains user-draggable; only positions that would be off-screen are
+  pulled back in.
+
 ## [1.1.6] - 2026-05-21
 
 ### Fixed (correctness)

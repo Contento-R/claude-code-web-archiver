@@ -1,0 +1,38 @@
+name: Userscript check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Syntax & metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Parse userscript with Node
+        run: node --check claude-code-web-archiver.user.js
+
+      - name: Validate userscript metadata block
+        run: |
+          set -euo pipefail
+          f=claude-code-web-archiver.user.js
+          grep -q '^// ==UserScript==' "$f" || { echo "missing ==UserScript== opening"; exit 1; }
+          grep -q '^// ==/UserScript==' "$f" || { echo "missing ==/UserScript== closing"; exit 1; }
+          for tag in @name @namespace @version @description @match @grant @run-at; do
+            grep -q "^// $tag" "$f" || { echo "missing required tag: $tag"; exit 1; }
+          done
+          # @version must look like semver
+          ver=$(grep -E '^// @version' "$f" | head -1 | awk '{print $3}')
+          echo "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "bad @version: $ver"; exit 1; }
+          echo "metadata OK (version $ver)"
