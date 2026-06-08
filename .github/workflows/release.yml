@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Backfill GitHub releases for every "vX.Y.Z" commit in history'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  current:
+    name: Auto-release current @version
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Release if @version is new
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ver=$(grep -E '^// @version' claude-code-web-archiver.user.js | head -1 | awk '{print $3}')
+          tag="v$ver"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists, skipping."
+            exit 0
+          fi
+          awk -v ver="$ver" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            printf "Release %s\n" "$tag" > /tmp/notes.md
+          fi
+          gh release create "$tag" \
+            --title "$tag" \
+            --notes-file /tmp/notes.md \
+            --target "${GITHUB_SHA}"
+
+  backfill:
+    name: Backfill releases from history
+    if: github.event_name == 'workflow_dispatch' && inputs.backfill == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create a release for every "vX.Y.Z" commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git log --reverse --format='%H %s' | while read -r sha subject; do
+            tag=$(printf '%s' "$subject" | grep -oE '^v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            if [ -z "$tag" ]; then
+              continue
+            fi
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "$tag exists, skipping."
+              continue
+            fi
+            ver="${tag#v}"
+            awk -v ver="$ver" '
+              $0 ~ "^## \\[" ver "\\]" { found=1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md > /tmp/notes.md
+            if [ ! -s /tmp/notes.md ]; then
+              printf "Release %s\n" "$tag" > /tmp/notes.md
+            fi
+            echo "Creating $tag at $sha"
+            gh release create "$tag" \
+              --title "$tag" \
+              --notes-file /tmp/notes.md \
+              --target "$sha"
+            sleep 1
+          done
