@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.2] - 2026-06-08
+
+### Removed
+- **Auto-resume.** Deleted the entire resume-from-snapshot path that
+  has caused recurring stuck-state bugs since v1.6.0. v1.11.1's
+  toggle-match check made stale snapshots discard themselves in
+  principle, but reports of "code keeps being stripped even with
+  No-code OFF" persisted in the field — meaning the resume loop was
+  still leaking state somewhere. The simplest reliable fix is to
+  delete the auto-resume code path entirely. Every Archive click now
+  starts from scratch.
+- `saveResumeSnapshot` is a no-op (kept as a stub so the call sites in
+  `autoScroll` don't need touching).
+
+### Added
+- Defensive `clearResumeSnapshot()` at script load. Users with a stuck
+  `cc-arch-resume` key in localStorage from earlier versions get a
+  clean slate on the first page reload after updating.
+
 ## [1.11.1] - 2026-06-08
 
 ### Fixed

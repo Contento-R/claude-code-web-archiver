@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.1
+// @version      1.11.2
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.1';
+    const VERSION = '1.11.2';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -449,27 +449,9 @@
     const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
     const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
     let lastResumeSaveTs = 0;
-    function saveResumeSnapshot() {
-        if (!chatContainer) return;
-        const now = Date.now();
-        // Throttle to once per ~5s during scroll.
-        if (now - lastResumeSaveTs < 5000) return;
-        try {
-            const payload = {
-                url: location.href,
-                ts: now,
-                version: VERSION,
-                seqCounter,
-                fastMode,
-                skipCode,
-                messages: [...messages.entries()],
-            };
-            const json = JSON.stringify(payload);
-            if (json.length > RESUME_MAX_BYTES) return; // skip silently — too big to persist
-            localStorage.setItem(RESUME_KEY, json);
-            lastResumeSaveTs = now;
-        } catch (_) { /* quota etc. — best-effort */ }
-    }
+    // Snapshot saving is disabled in v1.11.2 along with auto-resume.
+    // Kept as a no-op so the call sites in autoScroll don't need touching.
+    function saveResumeSnapshot() { /* intentionally empty */ }
     function loadResumeSnapshot() {
         try {
             const raw = localStorage.getItem(RESUME_KEY);
@@ -1976,29 +1958,14 @@ if(collapseBtn){
         recompileRedact();
         knownKeys = loadKnownKeys();
         onlyNewActiveForRun = !!settings.onlyNew;
-        // Auto-resume: if a snapshot exists for this URL, pick up where
-        // we left off — no popup. We ONLY resume when the snapshot was
-        // saved with the same panel toggles (No-code / Fast) the user
-        // currently has. Otherwise the snapshot is considered stale and
-        // discarded, because pre-stripped-code messages from an older
-        // run would otherwise silently take effect on a fresh archive.
-        // Previously we forcibly restored skipCode/fastMode from the
-        // snapshot — that was the source of the "code keeps being
-        // stripped even though I didn't press No-code" bug.
-        const snapshot = loadResumeSnapshot();
+        // Auto-resume is disabled. Every Archive click starts fresh.
+        // The previous resume system stored skipCode/fastMode in the
+        // snapshot. Even after v1.11.1 hardened the discard logic, the
+        // bug "code keeps being stripped" persisted in the field, so
+        // we cut the feature entirely. Any stale snapshot from old
+        // versions is removed defensively at run start.
+        clearResumeSnapshot();
         let resuming = false;
-        if (snapshot && Array.isArray(snapshot.messages) && snapshot.messages.length > 0) {
-            const sameToggles = (!!snapshot.skipCode === !!skipCode) &&
-                                (!!snapshot.fastMode === !!fastMode);
-            if (sameToggles) {
-                resuming = true;
-                for (const [k, v] of snapshot.messages) messages.set(k, v);
-                seqCounter = snapshot.seqCounter || messages.size;
-            } else {
-                clearResumeSnapshot();
-                console.debug('[archiver] discarded stale resume snapshot — panel toggles changed since it was saved');
-            }
-        }
         setArchiveBtnBusy(true);
         showOverlay();
         showStartNotification(resuming);
@@ -2650,6 +2617,11 @@ if(collapseBtn){
     }
 
     function init() {
+        // Defensive cleanup: v1.11.2 disabled auto-resume entirely, but
+        // older versions could have left a snapshot in localStorage that
+        // would no longer do anything useful. Drop it on every script
+        // load so users with stuck state get a fresh start automatically.
+        clearResumeSnapshot();
         addStyles();
         installGlobalDragListeners();
         installViewportWatchers();
