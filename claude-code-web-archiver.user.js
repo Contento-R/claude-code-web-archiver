@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.4.0
+// @version      1.5.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -33,7 +33,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.4.0';
+    const VERSION = '1.5.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -88,6 +88,17 @@
         settingsLocalOnlyHint: 'Skip the cross-origin screenshot fallback (GM_xmlhttpRequest). Images that need it will not be embedded.',
         settingsRedact: 'Redact secrets matching the patterns below',
         settingsRedactHint: 'One JavaScript regular expression per line. Each match is replaced with asterisks in the exported HTML.',
+        settingsFormat: 'Output format',
+        settingsFormatHtml: 'HTML — interactive, self-contained',
+        settingsFormatMd: 'Markdown — plain text',
+        settingsFormatJson: 'JSON — for machine processing',
+        settingsCollapse: 'Collapse assistant messages by default in HTML output',
+        searchPlaceholder: 'Search messages...',
+        tocJump: 'Jump to message...',
+        toggleTheme: 'Toggle theme',
+        toggleCollapse: 'Toggle assistant blocks',
+        showResponse: 'Show response',
+        hideResponse: 'Hide response',
     };
     const I18N = {
         en: I18N_EN,
@@ -141,6 +152,17 @@
             settingsLocalOnlyHint: 'Не использовать cross-origin fallback (GM_xmlhttpRequest). Картинки, которым он нужен, не будут встроены.',
             settingsRedact: 'Скрывать секреты по паттернам ниже',
             settingsRedactHint: 'Одно JavaScript-регулярное выражение в строке. Каждое совпадение заменяется на звёздочки в HTML.',
+            settingsFormat: 'Формат вывода',
+            settingsFormatHtml: 'HTML — интерактивный, автономный',
+            settingsFormatMd: 'Markdown — простой текст',
+            settingsFormatJson: 'JSON — для машинной обработки',
+            settingsCollapse: 'Сворачивать ответы Claude по умолчанию в HTML',
+            searchPlaceholder: 'Поиск по сообщениям…',
+            tocJump: 'Перейти к сообщению…',
+            toggleTheme: 'Переключить тему',
+            toggleCollapse: 'Свернуть/развернуть ответы',
+            showResponse: 'Показать ответ',
+            hideResponse: 'Скрыть ответ',
         },
         de: {
             htmlLang: 'de',
@@ -332,6 +354,8 @@
         localOnly: false,
         redactSecrets: false,
         secretPatterns: DEFAULT_SECRET_PATTERNS,
+        outputFormat: 'html', // 'html' | 'md' | 'json'
+        collapseAssistant: false,
     };
     function loadSettings() {
         try {
@@ -996,12 +1020,9 @@
         return map;
     }
 
-    // ===== BUILD FINAL HTML =====
-    function buildHtml(imgMap) {
-        const title = getTitle();
-        const parts = [];
+    // ===== ITERATION OVER MESSAGES IN EXPORT RANGE =====
+    function eachInRange(callback) {
         let n = 0;
-        let exported = 0;
         const rangeFrom = settings.rangeFrom;
         const rangeTo = settings.rangeTo;
         for (const k of order) {
@@ -1010,14 +1031,157 @@
             n++;
             if (rangeFrom && n < rangeFrom) continue;
             if (rangeTo && n > rangeTo) continue;
-            exported++;
+            callback(entry, n);
+        }
+    }
+
+    // Replace remote image URLs in an HTML string with embedded data: URLs.
+    function inlineImages(html, imgMap) {
+        if (!imgMap || imgMap.size === 0) return html;
+        const tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        tmp.querySelectorAll('img[src]').forEach((img) => {
+            const s = img.getAttribute('src');
+            if (s && imgMap.has(s)) img.setAttribute('src', imgMap.get(s));
+            img.setAttribute('loading', 'lazy');
+        });
+        return tmp.innerHTML;
+    }
+
+    // ===== HTML -> MARKDOWN =====
+    // Pragmatic, not exhaustive. Covers the elements Claude Code Web
+    // actually emits in messages: paragraphs, headings, lists, blockquotes,
+    // code (inline and block), tables, images, links, emphasis.
+    function htmlToMarkdown(htmlStr) {
+        const root = document.createElement('div');
+        root.innerHTML = htmlStr;
+        const out = walkNodeToMd(root).replace(/\n{3,}/g, '\n\n');
+        return out.trim();
+    }
+    function walkNodeToMd(node) {
+        if (node.nodeType === 3) return node.textContent;
+        if (node.nodeType !== 1) return '';
+        const tag = node.tagName.toLowerCase();
+        const kids = () => Array.from(node.childNodes).map(walkNodeToMd).join('');
+        switch (tag) {
+            case 'br': return '\n';
+            case 'p': return '\n\n' + kids() + '\n\n';
+            case 'h1': return '\n\n# ' + kids().trim() + '\n\n';
+            case 'h2': return '\n\n## ' + kids().trim() + '\n\n';
+            case 'h3': return '\n\n### ' + kids().trim() + '\n\n';
+            case 'h4': return '\n\n#### ' + kids().trim() + '\n\n';
+            case 'h5': return '\n\n##### ' + kids().trim() + '\n\n';
+            case 'h6': return '\n\n###### ' + kids().trim() + '\n\n';
+            case 'strong': case 'b': return '**' + kids() + '**';
+            case 'em': case 'i': return '*' + kids() + '*';
+            case 'del': case 's': return '~~' + kids() + '~~';
+            case 'code': {
+                if (node.parentElement && node.parentElement.tagName === 'PRE') return node.textContent || '';
+                return '`' + (node.textContent || '') + '`';
+            }
+            case 'pre': return '\n\n```\n' + (node.textContent || '').replace(/\n+$/, '') + '\n```\n\n';
+            case 'a': {
+                const href = node.getAttribute('href') || '';
+                const text = kids().trim();
+                return href ? `[${text}](${href})` : text;
+            }
+            case 'img': {
+                const src = node.getAttribute('src') || '';
+                const alt = node.getAttribute('alt') || '';
+                return src ? `![${alt}](${src})` : '';
+            }
+            case 'ul': {
+                const items = Array.from(node.children).filter(c => c.tagName === 'LI');
+                const lines = items.map(li => '- ' + walkNodeToMd(li).trim().replace(/\n/g, '\n  '));
+                return '\n\n' + lines.join('\n') + '\n\n';
+            }
+            case 'ol': {
+                const items = Array.from(node.children).filter(c => c.tagName === 'LI');
+                const lines = items.map((li, i) => (i + 1) + '. ' + walkNodeToMd(li).trim().replace(/\n/g, '\n   '));
+                return '\n\n' + lines.join('\n') + '\n\n';
+            }
+            case 'li': return kids();
+            case 'blockquote': return '\n\n> ' + kids().trim().replace(/\n/g, '\n> ') + '\n\n';
+            case 'hr': return '\n\n---\n\n';
+            case 'table': {
+                const rows = Array.from(node.querySelectorAll('tr'));
+                if (rows.length === 0) return '';
+                const lines = rows.map(tr =>
+                    '| ' + Array.from(tr.children).map(td => (td.textContent || '').trim().replace(/\|/g, '\\|').replace(/\n/g, ' ')).join(' | ') + ' |'
+                );
+                if (rows[0].querySelector('th')) {
+                    const cellCount = Math.max(1, (lines[0].match(/\|/g) || []).length - 1);
+                    lines.splice(1, 0, '| ' + Array(cellCount).fill('---').join(' | ') + ' |');
+                }
+                return '\n\n' + lines.join('\n') + '\n\n';
+            }
+            case 'details': return '\n\n' + kids() + '\n\n';
+            case 'summary': return '**' + kids().trim() + '**\n\n';
+            default: return kids();
+        }
+    }
+
+    // ===== BUILD MARKDOWN =====
+    function buildMarkdown(imgMap) {
+        const title = getTitle();
+        const lines = [
+            `# ${title}`,
+            '',
+            `*${T.archivedLabel}: ${new Date().toLocaleString()} · ${T.sourceLabel}: ${location.href} · ${T.parserLabel}: ${VERSION}${detectedModel ? ' · ' + detectedModel : ''}*`,
+            '',
+            '---',
+            '',
+        ];
+        eachInRange((entry, n) => {
+            const roleLabel = entry.role === 'user' ? T.userLabel : T.assistantLabel;
+            const tags = [];
+            if (entry.tool) tags.push(`\`${entry.tool}\``);
+            if (entry.time) tags.push(`*${formatTimestamp(entry.time)}*`);
+            const header = `## #${n} · ${roleLabel}${tags.length ? ' — ' + tags.join(' ') : ''}`;
+            const body = htmlToMarkdown(inlineImages(entry.html, imgMap));
+            lines.push(header, '', body, '', '');
+        });
+        return lines.join('\n');
+    }
+
+    // ===== BUILD JSON =====
+    function buildJson(imgMap) {
+        const items = [];
+        eachInRange((entry, n) => {
             const tmp = document.createElement('div');
             tmp.innerHTML = entry.html;
-            tmp.querySelectorAll('img[src]').forEach(img => {
-                const s = img.getAttribute('src');
-                if (s && imgMap.has(s)) img.setAttribute('src', imgMap.get(s));
-                img.setAttribute('loading', 'lazy');
+            const text = (tmp.textContent || '').replace(/\s+/g, ' ').trim();
+            items.push({
+                number: n,
+                role: entry.role,
+                tool: entry.tool || null,
+                time: entry.time || null,
+                text,
+                html: inlineImages(entry.html, imgMap),
             });
+        });
+        return JSON.stringify({
+            title: getTitle(),
+            archivedAt: new Date().toISOString(),
+            source: location.href,
+            parserVersion: VERSION,
+            model: detectedModel || null,
+            messageCount: items.length,
+            messages: items,
+        }, null, 2);
+    }
+
+    // ===== BUILD FINAL HTML =====
+    function buildHtml(imgMap) {
+        const title = getTitle();
+        const collapse = !!settings.collapseAssistant;
+        const parts = [];
+        const tocEntries = [];
+        let exported = 0;
+        eachInRange((entry, n) => {
+            exported++;
+            const id = 'msg-' + n;
+            const bodyHtml = inlineImages(entry.html, imgMap);
             const roleClass = entry.role === 'user' ? 'msg user' : 'msg assistant';
             const roleLabel = entry.role === 'user' ? T.userLabel : T.assistantLabel;
             const toolBadge = entry.tool
@@ -1026,28 +1190,48 @@
                 ? `<span class="model-badge">${esc(detectedModel)}</span>` : '';
             const timeBadge = entry.time
                 ? `<span class="timestamp" title="${esc(entry.time)}">${esc(formatTimestamp(entry.time))}</span>` : '';
+            const tmp = document.createElement('div');
+            tmp.innerHTML = entry.html;
+            const snippet = ((tmp.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80)) || roleLabel;
+            tocEntries.push({ id, n, role: entry.role, snippet });
+            let body;
+            if (entry.role === 'assistant' && collapse) {
+                body = `<details><summary>${esc(T.showResponse)} — ${esc(snippet)}</summary><div class="body">${bodyHtml}</div></details>`;
+            } else {
+                body = `<div class="body">${bodyHtml}</div>`;
+            }
             parts.push(
-                `<section class="${roleClass}"><div class="role">${roleLabel} · #${n}${toolBadge}${modelBadge}${timeBadge}</div>` +
-                `<div class="body">${tmp.innerHTML}</div></section>`
+                `<section id="${id}" class="${roleClass}" data-role="${entry.role}"><div class="role">${roleLabel} · #${n}${toolBadge}${modelBadge}${timeBadge}</div>${body}</section>`
             );
-        }
+        });
+        const tocHtml = tocEntries
+            .filter(e => e.role === 'user')
+            .map(e => `<option value="${esc(e.id)}">#${e.n} · ${esc(e.snippet)}</option>`)
+            .join('');
         const css = `
 :root{--bg:#0f1115;--card:#171a21;--user:#1e2a3a;--text:#e6e8eb;--muted:#9aa4b2;--accent:#6ea8fe;--code:#0b0d12;--border:#2a2f3a}
+body[data-theme="light"]{--bg:#f9fafb;--card:#ffffff;--user:#dbeafe;--text:#111827;--muted:#6b7280;--accent:#1d4ed8;--code:#f3f4f6;--border:#e5e7eb}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-header{position:sticky;top:0;background:rgba(15,17,21,.95);backdrop-filter:blur(6px);border-bottom:1px solid var(--border);padding:16px 24px;z-index:10}
+header{position:sticky;top:0;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(6px);border-bottom:1px solid var(--border);padding:14px 24px;z-index:10}
 header h1{margin:0 0 6px;font-size:20px}
-header .meta{color:var(--muted);font-size:13px;word-break:break-all}
+header .meta{color:var(--muted);font-size:13px;word-break:break-all;margin-bottom:10px}
+.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.controls input,.controls select,.controls button{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font:inherit}
+.controls input{flex:1;min-width:180px}
+.controls select{max-width:380px}
+.controls button{cursor:pointer}
+.controls button:hover{filter:brightness(1.15)}
 main{max-width:980px;margin:0 auto;padding:24px}
 .msg{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
 .msg.user{background:var(--user)}
 .role{font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
-.tool-badge{display:inline-block;padding:1px 8px;background:rgba(110,168,254,.22);color:#6ea8fe;border-radius:4px;font-size:10px;font-weight:700;margin-left:8px;letter-spacing:.04em;vertical-align:middle}
+.tool-badge{display:inline-block;padding:1px 8px;background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--accent);border-radius:4px;font-size:10px;font-weight:700;margin-left:8px;letter-spacing:.04em;vertical-align:middle}
 .model-badge{display:inline-block;padding:1px 8px;background:rgba(155,127,255,.2);color:#bba9ff;border-radius:4px;font-size:10px;font-weight:700;margin-left:6px;letter-spacing:.04em;vertical-align:middle}
 .timestamp{display:inline-block;color:var(--muted);font-size:11px;font-weight:400;margin-left:10px;text-transform:none;letter-spacing:0;vertical-align:middle}
 .body :where(p,ul,ol,table){margin:.5em 0}
 .body pre{background:var(--code);border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto;font:13px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace}
-.body code{background:rgba(255,255,255,.08);padding:.1em .35em;border-radius:4px;font-family:"SFMono-Regular",Consolas,monospace;font-size:.92em}
+.body code{background:color-mix(in srgb,var(--text) 8%,transparent);padding:.1em .35em;border-radius:4px;font-family:"SFMono-Regular",Consolas,monospace;font-size:.92em}
 .body pre code{background:none;padding:0}
 .body img{max-width:100%;height:auto;border:1px solid var(--border);border-radius:8px;margin:8px 0;display:block}
 .body a{color:var(--accent)}
@@ -1055,16 +1239,84 @@ main{max-width:980px;margin:0 auto;padding:24px}
 .body th,.body td{border:1px solid var(--border);padding:6px 10px;text-align:left}
 .body details{border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:8px 0}
 .body summary{cursor:pointer;color:var(--muted)}
+.msg > details > summary{cursor:pointer;color:var(--muted);font-size:13px;margin:-4px 0 0}
+.msg > details[open] > summary{margin-bottom:10px}
+.msg.hidden{display:none}
+@media print {
+  header{position:static;background:#fff;color:#000;border-bottom:1px solid #ccc}
+  .controls{display:none}
+  body{background:#fff;color:#000}
+  .msg{break-inside:avoid;page-break-inside:avoid;background:#fff;border:1px solid #ccc;color:#000}
+  .msg.user{background:#f1f5f9}
+  .body pre,.body code{background:#f3f4f6;color:#111}
+  .body img{border:1px solid #ccc}
+  details{break-inside:avoid}
+  details > summary{display:none}
+  details > *:not(summary){display:block !important}
+}
 `;
-        const meta = `${T.archivedLabel}: ${new Date().toLocaleString()} · ${T.messagesLabel}: ${exported} · ${T.sourceLabel}: ${esc(location.href)} · ${T.parserLabel}: ${VERSION}`;
+        // Inline JS: search, jump-to TOC, theme toggle, expand/collapse all.
+        const inlineScript = `(function(){
+var sections=Array.prototype.slice.call(document.querySelectorAll('main > section'));
+var search=document.getElementById('cc-search');
+var toc=document.getElementById('cc-toc');
+var themeBtn=document.getElementById('cc-theme-toggle');
+var collapseBtn=document.getElementById('cc-collapse-toggle');
+if(search){
+  search.addEventListener('input',function(){
+    var q=search.value.toLowerCase().trim();
+    sections.forEach(function(s){
+      if(!q){ s.classList.remove('hidden'); return; }
+      var t=(s.textContent||'').toLowerCase();
+      s.classList.toggle('hidden', t.indexOf(q)===-1);
+    });
+  });
+}
+if(toc){
+  toc.addEventListener('change',function(){
+    var id=toc.value;
+    if(!id) return;
+    var el=document.getElementById(id);
+    if(el){ el.scrollIntoView({behavior:'smooth',block:'start'}); }
+    toc.value='';
+  });
+}
+function applyTheme(t){
+  document.body.dataset.theme=t;
+  try{ localStorage.setItem('cc-arch-theme', t); }catch(e){}
+}
+try{ var saved=localStorage.getItem('cc-arch-theme'); if(saved) applyTheme(saved); }catch(e){}
+if(themeBtn){
+  themeBtn.addEventListener('click',function(){
+    var cur=document.body.dataset.theme||'dark';
+    applyTheme(cur==='dark'?'light':'dark');
+  });
+}
+if(collapseBtn){
+  collapseBtn.addEventListener('click',function(){
+    var dets=document.querySelectorAll('section.msg.assistant > details');
+    if(!dets.length) return;
+    var anyOpen=Array.prototype.some.call(dets,function(d){return d.open;});
+    dets.forEach(function(d){ d.open=!anyOpen; });
+  });
+}
+})();`;
+        const meta = `${T.archivedLabel}: ${new Date().toLocaleString()} · ${T.messagesLabel}: ${exported} · ${T.sourceLabel}: ${esc(location.href)} · ${T.parserLabel}: ${VERSION}${detectedModel ? ' · ' + esc(detectedModel) : ''}`;
+        const controls = `<div class="controls">
+  <input id="cc-search" type="search" placeholder="${esc(T.searchPlaceholder)}">
+  <select id="cc-toc"><option value="">${esc(T.tocJump)}</option>${tocHtml}</select>
+  <button id="cc-collapse-toggle" type="button" title="${esc(T.toggleCollapse)}">▾▴</button>
+  <button id="cc-theme-toggle" type="button" title="${esc(T.toggleTheme)}">🌓</button>
+</div>`;
         return `<!DOCTYPE html>
 <html lang="${T.htmlLang}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <style>${css}</style></head>
 <body>
-<header><h1>${esc(title)}</h1><div class="meta">${meta}</div></header>
+<header><h1>${esc(title)}</h1><div class="meta">${meta}</div>${controls}</header>
 <main>${parts.join('\n')}</main>
+<script>${inlineScript}</script>
 </body></html>`;
     }
 
@@ -1110,8 +1362,25 @@ main{max-width:980px;margin:0 auto;padding:24px}
             imgMap = await downloadAllImages();
             if (cancelled) { setProgress(T.cancelled, true); return; }
             setProgress(T.building, true);
-            const html = buildHtml(imgMap);
-            download(html, 'html', 'text/html;charset=utf-8');
+            // Dispatch to the configured output format.
+            let content, ext, mime;
+            switch (settings.outputFormat) {
+                case 'md':
+                    content = buildMarkdown(imgMap);
+                    ext = 'md';
+                    mime = 'text/markdown;charset=utf-8';
+                    break;
+                case 'json':
+                    content = buildJson(imgMap);
+                    ext = 'json';
+                    mime = 'application/json;charset=utf-8';
+                    break;
+                default:
+                    content = buildHtml(imgMap);
+                    ext = 'html';
+                    mime = 'text/html;charset=utf-8';
+            }
+            download(content, ext, mime);
             setProgress(T.done(order.length, imgMap.size), true);
             recordArchive(order.length, imgMap.size);
             // Always remember which keys we've now archived for this URL,
@@ -1161,7 +1430,7 @@ main{max-width:980px;margin:0 auto;padding:24px}
 .cc-arch-modal h2{margin:0 0 14px;font-size:16px;font-weight:700}
 .cc-arch-modal label{display:flex;align-items:center;gap:8px;margin:12px 0 2px;font-size:13px;cursor:pointer}
 .cc-arch-modal label.block{flex-direction:column;align-items:stretch;gap:4px;cursor:default}
-.cc-arch-modal input[type=text],.cc-arch-modal input[type=number],.cc-arch-modal textarea{background:#0b0d12;border:1px solid #2a2f3a;color:#e6e8eb;border-radius:6px;padding:6px 8px;font:inherit;width:100%;box-sizing:border-box}
+.cc-arch-modal input[type=text],.cc-arch-modal input[type=number],.cc-arch-modal textarea,.cc-arch-modal select{background:#0b0d12;border:1px solid #2a2f3a;color:#e6e8eb;border-radius:6px;padding:6px 8px;font:inherit;width:100%;box-sizing:border-box}
 .cc-arch-modal input[type=number]{width:100px}
 .cc-arch-modal textarea{min-height:96px;font:12px/1.4 "SFMono-Regular",Consolas,Menlo,monospace;resize:vertical}
 .cc-arch-modal .row{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
@@ -1225,6 +1494,14 @@ main{max-width:980px;margin:0 auto;padding:24px}
         modal.setAttribute('aria-modal', 'true');
         modal.innerHTML = `<div class="cc-arch-modal-card">
   <h2>${esc(T.settingsTitle)}</h2>
+  <label class="block"><span>${esc(T.settingsFormat)}</span>
+    <select data-k="outputFormat">
+      <option value="html">${esc(T.settingsFormatHtml)}</option>
+      <option value="md">${esc(T.settingsFormatMd)}</option>
+      <option value="json">${esc(T.settingsFormatJson)}</option>
+    </select>
+  </label>
+  <label><input type="checkbox" data-k="collapseAssistant"> <span>${esc(T.settingsCollapse)}</span></label>
   <label><input type="checkbox" data-k="onlyNew"> <span>${esc(T.settingsOnlyNew)}</span></label>
   <div class="hint">${esc(T.settingsOnlyNewHint)}</div>
   <div class="row">
@@ -1251,6 +1528,7 @@ main{max-width:980px;margin:0 auto;padding:24px}
             const k = el.getAttribute('data-k');
             if (el.type === 'checkbox') el.checked = !!cur[k];
             else if (el.type === 'number') el.value = cur[k] == null ? '' : cur[k];
+            else if (el.tagName === 'SELECT') el.value = cur[k] || 'html';
             else el.value = cur[k] == null ? '' : cur[k];
         });
 
@@ -1263,6 +1541,8 @@ main{max-width:980px;margin:0 auto;padding:24px}
                 else if (el.type === 'number') {
                     const v = parseInt(el.value, 10);
                     next[k] = Number.isFinite(v) && v > 0 ? v : null;
+                } else if (el.tagName === 'SELECT') {
+                    next[k] = el.value || 'html';
                 } else {
                     next[k] = el.value;
                 }

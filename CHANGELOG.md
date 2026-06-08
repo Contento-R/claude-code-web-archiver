@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-05-21
+
+### Added
+- **Output format selector (#6).** Settings modal now has a dropdown for
+  HTML / Markdown / JSON. The Markdown builder converts the captured DOM
+  (headings, lists, code, tables, links, images, blockquotes, emphasis)
+  into a clean text file. The JSON builder emits a structured document
+  with per-message `number`, `role`, `tool`, `time`, `text` and `html`
+  fields plus a session-level `model` field.
+- **TOC + search in exported HTML (#7).** The HTML output now ships with
+  a sticky controls bar carrying a search input (filters messages live
+  as you type), a "Jump to message…" dropdown over all user prompts, an
+  expand/collapse-all button for assistant blocks, and a theme toggle.
+- **Light / dark theme toggle in exported HTML (#8).** A 🌓 button in the
+  header flips between the existing dark palette and a new light palette,
+  persisted to `localStorage` so re-opens remember the choice.
+- **Collapse assistant blocks (#9).** New setting wraps every assistant
+  message body in `<details>` with a preview summary; combined with the
+  toggle-all button it makes long sessions browsable.
+- **Print stylesheet (#10).** `@media print` rules hide controls, expand
+  all collapsed blocks, force-light the palette and use
+  `break-inside: avoid` on each message so PDF exports look right.
+
+### Notes
+- Range filter and inlined screenshots apply identically to all three
+  output formats.
+- The exported HTML's inline script has no external dependencies and
+  works fully offline.
+
 ## [1.4.0] - 2026-05-21
 
 ### Added
