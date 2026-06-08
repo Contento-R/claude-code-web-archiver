@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.10.0
+// @version      1.11.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.10.0';
+    const VERSION = '1.11.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -824,7 +824,38 @@
         if (!el || !el.getAttribute) return '';
         return el.getAttribute('class') || '';
     }
+    // Claude Code Web ("epitaxy" UI) — verified PRIMARY role signal.
+    // The host wraps every user-prompt bubble in a container carrying the
+    // `epitaxy-user-turn` class. Assistant turns never carry it. The CSS
+    // variables `--ui-user-message-background` / `--ui-user-message-primary-text`
+    // are exclusive to user bubbles too. Assistant turns reveal themselves via
+    // `epitaxy-markdown` / `text-assistant-primary` / `text-assistant-secondary`.
+    // Verified empirically against a DOM diagnostic dump (6 users, 7 assistants,
+    // 100% accuracy on the sample).
+    function epitaxyRole(node) {
+        if (!node) return null;
+        try {
+            if (node.querySelector && node.querySelector('.epitaxy-user-turn')) return 'user';
+            if (node.matches && node.matches('.epitaxy-user-turn')) return 'user';
+        } catch (_) { /* ignore */ }
+        try {
+            const html = node.outerHTML || '';
+            if (html.indexOf('ui-user-message-background') !== -1) return 'user';
+            if (html.indexOf('ui-user-message-primary-text') !== -1) return 'user';
+            // We're on epitaxy and didn't find a user marker — assistant.
+            if (html.indexOf('epitaxy-markdown') !== -1) return 'assistant';
+            if (html.indexOf('text-assistant-primary') !== -1) return 'assistant';
+            if (html.indexOf('text-assistant-secondary') !== -1) return 'assistant';
+        } catch (_) { /* ignore */ }
+        return null;
+    }
+
     function guessRole(node) {
+        // 0) Claude Code Web (epitaxy UI) — primary, verified signal.
+        const er = epitaxyRole(node);
+        if (er) return er;
+
+        // 1) Explicit role attributes on the node itself.
         let r = roleFromAttrs(node);
         if (r) return r;
         for (let p = node.parentElement, i = 0; p && i < 10; p = p.parentElement, i++) {
@@ -1153,6 +1184,21 @@
         debugBuffer.push(block.join('\n'));
     }
 
+    // Read data-index off the node or up to 5 ancestors. Used as the
+    // primary chronological-order key for the epitaxy virtualised list.
+    function readDataIndex(node) {
+        let p = node;
+        for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
+            if (!p.getAttribute) continue;
+            const v = p.getAttribute('data-index');
+            if (v !== null && v !== '') {
+                const n = parseInt(v, 10);
+                if (Number.isFinite(n)) return n;
+            }
+        }
+        return null;
+    }
+
     // ===== CAPTURE WHAT'S CURRENTLY IN THE DOM =====
     function captureVisible(container) {
         const containerRect = container.getBoundingClientRect();
@@ -1179,6 +1225,13 @@
                 html: sanitizeClone(node).outerHTML,
                 role,
                 y,
+                // Claude Code Web puts a stable chronological index on
+                // each top-level message wrapper. The Y position computed
+                // from the virtualizer is NOT stable as content shifts —
+                // verified from a real DOM dump where later-captured
+                // messages had smaller Y than earlier ones. Use the
+                // attribute when present; fall back to Y otherwise.
+                dataIndex: readDataIndex(node),
                 seq: seqCounter++,
                 tool: detectTool(text, node),
                 time: detectTimestamp(node),
@@ -1340,6 +1393,13 @@
         const entries = [...messages.values()];
         if (entries.length === 0) return 0;
 
+        // Short-circuit: if the verified epitaxy detector produced a
+        // healthy split (at least one user, at least one assistant),
+        // trust it. The heuristics below only exist as fallback for
+        // non-epitaxy Claude UI variants.
+        const userCount0 = entries.filter(e => e.role === 'user').length;
+        if (userCount0 >= 1 && userCount0 <= entries.length - 1) return 0;
+
         const sorted = entries.slice().sort((a, b) => (a.y - b.y) || (a.seq - b.seq));
 
         // 1. Locate the first message that ISN'T definitely assistant
@@ -1407,8 +1467,18 @@
     }
 
     function buildOrder() {
+        // Primary key: host-provided `data-index` (stable across virtualizer
+        // re-renders). Secondary: visual Y position. Tertiary: capture seq.
         return [...messages.entries()]
-            .sort((a, b) => (a[1].y - b[1].y) || (a[1].seq - b[1].seq))
+            .sort((a, b) => {
+                const ai = a[1].dataIndex;
+                const bi = b[1].dataIndex;
+                if (ai !== null && bi !== null && ai !== bi) return ai - bi;
+                if (ai !== null && bi === null) return -1;
+                if (ai === null && bi !== null) return 1;
+                if (a[1].y !== b[1].y) return a[1].y - b[1].y;
+                return a[1].seq - b[1].seq;
+            })
             .map(([k]) => k);
     }
 

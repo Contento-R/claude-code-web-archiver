@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-06-08
+
+### Fixed (role detection — verified against real DOM)
+- **Discovered the actual marker** the host uses. A DOM diagnostic dump
+  collected via the v1.10.0 debug mode revealed Claude Code Web's
+  "epitaxy" UI:
+  - every user prompt is wrapped in a container with class
+    **`epitaxy-user-turn`**
+  - user bubbles additionally reference the CSS variables
+    `--ui-user-message-background` and `--ui-user-message-primary-text`
+  - assistant turns never carry the user wrapper; they expose
+    `epitaxy-markdown`, `text-assistant-primary`, `text-assistant-secondary`
+  - 100% accuracy on the 13-message sample (6 user, 7 assistant)
+- `guessRole` now has a new step 0 that checks these markers FIRST,
+  short-circuiting before the speculative heuristics that kept
+  misfiring. The old logic is retained as fallback for other Claude UI
+  variants (claude.ai chat, ChatGPT-style mirrors).
+- `normalizeRoles` is now a no-op whenever the primary detector
+  produced a healthy user/assistant split.
+
+### Fixed (message ordering)
+- The virtualizer's visual Y position is **not stable** across renders
+  — in the debug dump, message #12 had Y=3446 captured AFTER #11 at
+  Y=5879. Y-based sort would put them in the wrong order.
+- Each top-level message wrapper carries a stable
+  **`data-index="N"`** attribute reflecting the host's chronological
+  ordering. `buildOrder` now uses that as the primary sort key, with
+  Y position as a secondary fallback (for non-epitaxy UIs).
+
 ## [1.10.0] - 2026-06-02
 
 ### Added
