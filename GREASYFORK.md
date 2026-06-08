@@ -24,15 +24,19 @@ Save the entire Claude Code Web session as one self-contained HTML with screensh
 ```markdown
 Save the **entire** Claude Code Web session — including history the cloud has already compacted — as a single self-contained HTML file with all screenshots embedded as `data:` URLs. Also exports Markdown and JSON.
 
-A small, draggable green panel appears on `code.claude.com`, `claude.ai/code` and `claude.com/code` with five controls:
+A small, **auto-collapsing** green panel appears on `code.claude.com`, `claude.ai/code` and `claude.com/code` with five controls:
 
 - **⬇ Archive** — walks the whole session, captures every message in chronological order, downloads screenshots, and saves a portable file you can open offline in any browser.
-- **⚡ Fast** — toggles an aggressive timing profile and parallelizes screenshot downloads from 4 to 10 concurrent requests.
+- **⚡ Fast** — toggles an aggressive timing profile and parallelizes screenshot downloads from 6 to 10 concurrent requests.
 - **📝 No code** — excludes code blocks Claude writes (tool calls, diffs, file viewers, `<pre>` fences) so only the conversation between you and the agent is exported. Detection uses computed `font-family` on the live DOM, so it works regardless of how the upstream UI wraps its code containers.
 - **⚙ Settings** — output format (HTML / Markdown / JSON), "only new" delta mode, range filter, local-only network mode, secret redaction (regex list), and "collapse assistant blocks by default".
 - Drag handle (`⋮⋮`) on the left edge — panel position persists in `localStorage` and auto-clamps to the viewport on window resize so it never disappears off-screen.
 
+3 s after the cursor leaves the panel it **shrinks to a small green circle**. Hover or focus re-expands it. Suspended during archiving and while the settings modal is open. The circle is also draggable.
+
 Hotkeys: **Alt+A** to start, **Esc** to cancel.
+
+The script does a daily background check against `main` on GitHub. When a newer version is published, a yellow dot appears on the ⚙ button and the settings modal shows an "Install" banner — clicking it lets Tampermonkey perform its normal reinstall flow.
 
 ## Why
 
