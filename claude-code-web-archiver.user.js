@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.9.0
+// @version      1.10.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.9.0';
+    const VERSION = '1.10.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -113,6 +113,8 @@
         checkingUpdates: 'Checking…',
         noUpdates: 'You are on the latest version',
         viewReleases: 'View releases',
+        settingsDebug: 'Debug mode (also save a DOM diagnostic file)',
+        settingsDebugHint: 'When enabled, the next archive run additionally saves a .debug.txt file containing each captured message\'s DOM structure (classes, role attributes, computed styles, avatars, buttons, ancestor chain). Share that file with the script author so the role detector can be tuned for the current Claude Code Web build. Disabled by default. The file contains text previews of your messages — review it before sharing.',
     };
     const I18N = {
         en: I18N_EN,
@@ -190,6 +192,8 @@
             checkingUpdates: 'Проверяю…',
             noUpdates: 'У вас актуальная версия',
             viewReleases: 'Релизы на GitHub',
+            settingsDebug: 'Debug-режим (сохраняет диагностический файл DOM)',
+            settingsDebugHint: 'При включении следующая архивация сгенерирует дополнительный файл .debug.txt с разметкой каждого захваченного сообщения (классы, role-атрибуты, computed styles, аватары, кнопки, цепочка родителей). Пришли этот файл автору скрипта, чтобы настроить детектор ролей под текущую сборку Claude Code Web. По умолчанию выключено. Файл содержит превью текста твоих сообщений — посмотри его перед отправкой.',
         },
         de: {
             htmlLang: 'de',
@@ -392,6 +396,7 @@
         secretPatterns: DEFAULT_SECRET_PATTERNS,
         outputFormat: 'html', // 'html' | 'md' | 'json'
         collapseAssistant: false,
+        debugMode: false,
     };
     function loadSettings() {
         try {
@@ -1011,6 +1016,143 @@
         }
     }
 
+    // ===== DEBUG / DIAGNOSTIC LOGGING =====
+    // When settings.debugMode is on, recordDebug() is called once per
+    // newly-captured message and pushes a detailed text block into
+    // debugBuffer. At the end of run() we serialise the buffer into a
+    // .debug.txt file alongside the archive. The point: the file tells
+    // the script author what signals the page actually exposes, so
+    // role detection can be tuned to real DOM instead of guesses.
+    let debugBuffer = [];
+    const DEBUG_ATTRS_TO_LOG = new Set([
+        'class', 'id', 'role', 'tabindex',
+        'data-message-author-role', 'data-author-role', 'data-author',
+        'data-role', 'data-actor', 'data-sender', 'data-from', 'data-testid',
+        'data-message-id', 'data-conversation-turn', 'data-turn-id', 'data-id',
+        'aria-label', 'aria-roledescription', 'aria-describedby',
+    ]);
+    function collectInterestingAttrs(el, label, out) {
+        if (!el || !el.getAttributeNames) return;
+        for (const name of el.getAttributeNames()) {
+            const keepStandard = DEBUG_ATTRS_TO_LOG.has(name);
+            const keepData = name.startsWith('data-') && name.length < 60;
+            const keepAria = name.startsWith('aria-') && name.length < 60;
+            if (!(keepStandard || keepData || keepAria)) continue;
+            const value = (el.getAttribute(name) || '').slice(0, 250);
+            out.push(`  ${label}.${name} = ${JSON.stringify(value)}`);
+        }
+    }
+    function recordDebug(node, text, role) {
+        if (!settings.debugMode) return;
+        if (!node) return;
+        let cs = {};
+        try { cs = getComputedStyle(node) || {}; } catch (_) {}
+        let rect = { top: 0, left: 0, right: 0, width: 0 };
+        try { rect = node.getBoundingClientRect() || rect; } catch (_) {}
+
+        const block = [];
+        const idx = debugBuffer.length + 1;
+        block.push(`========================================`);
+        block.push(`MESSAGE #${idx}    detected role: ${role}`);
+        block.push(`========================================`);
+        block.push(`Y position: ${Math.round((rect.top || 0))}`);
+        block.push(`Text preview (200 chars):`);
+        block.push(`  ${(text || '').slice(0, 200).replace(/\s+/g, ' ').trim()}`);
+        block.push('');
+
+        block.push(`-- NODE --`);
+        block.push(`tag: <${(node.tagName || '?').toLowerCase()}>`);
+        const nodeAttrs = [];
+        collectInterestingAttrs(node, 'node', nodeAttrs);
+        if (nodeAttrs.length) block.push(...nodeAttrs); else block.push('  (no interesting attributes on the node itself)');
+        block.push('');
+
+        block.push(`-- COMPUTED STYLES (on node) --`);
+        const styleKeys = [
+            'backgroundColor', 'borderColor', 'borderWidth', 'borderRadius',
+            'color', 'textAlign', 'alignSelf', 'justifySelf', 'justifyContent',
+            'marginLeft', 'marginRight', 'paddingLeft', 'paddingRight',
+            'width', 'maxWidth', 'display', 'flexDirection', 'gap',
+            'fontFamily', 'fontSize', 'fontWeight',
+        ];
+        for (const k of styleKeys) {
+            const v = cs[k];
+            if (v !== undefined && v !== '') block.push(`  ${k}: ${v}`);
+        }
+        block.push('');
+
+        block.push(`-- GEOMETRY --`);
+        block.push(`  rect: left=${Math.round(rect.left)} right=${Math.round(rect.right)} width=${Math.round(rect.width)}`);
+        if (node.parentElement) {
+            try {
+                const prect = node.parentElement.getBoundingClientRect();
+                block.push(`  parent rect: left=${Math.round(prect.left)} right=${Math.round(prect.right)} width=${Math.round(prect.width)}`);
+            } catch (_) {}
+        }
+        block.push('');
+
+        // Avatars / images
+        const imgs = [];
+        try {
+            for (const img of (node.querySelectorAll ? node.querySelectorAll('img') : [])) {
+                imgs.push(`  img alt=${JSON.stringify((img.getAttribute('alt') || '').slice(0, 60))} src=${JSON.stringify((img.getAttribute('src') || '').slice(0, 120))} class=${JSON.stringify(((img.className && img.className.baseVal) || img.className || '').toString().slice(0, 100))}`);
+            }
+        } catch (_) {}
+        // Avatar-like containers
+        const avatarContainers = [];
+        try {
+            for (const el of (node.querySelectorAll ? node.querySelectorAll('[class*="avatar" i],[data-testid*="avatar" i],[aria-label*="avatar" i]') : [])) {
+                avatarContainers.push(`  <${el.tagName.toLowerCase()}> class=${JSON.stringify((el.getAttribute('class') || '').slice(0, 100))} aria-label=${JSON.stringify((el.getAttribute('aria-label') || '').slice(0, 60))} text=${JSON.stringify((el.textContent || '').trim().slice(0, 30))}`);
+            }
+        } catch (_) {}
+        block.push(`-- AVATARS / IMAGES --`);
+        if (imgs.length === 0 && avatarContainers.length === 0) {
+            block.push('  (none)');
+        } else {
+            block.push(...imgs);
+            block.push(...avatarContainers);
+        }
+        block.push('');
+
+        // Buttons (often differ between user and assistant messages)
+        const buttons = [];
+        try {
+            const list = node.querySelectorAll ? node.querySelectorAll('button, [role="button"]') : [];
+            let i = 0;
+            for (const btn of list) {
+                if (i >= 12) { buttons.push(`  ... (${list.length - 12} more buttons)`); break; }
+                const aria = btn.getAttribute('aria-label') || '';
+                const title = btn.getAttribute('title') || '';
+                const tx = (btn.textContent || '').trim();
+                const cls = ((btn.className && btn.className.baseVal) || btn.className || '').toString();
+                buttons.push(`  button aria-label=${JSON.stringify(aria.slice(0, 60))} title=${JSON.stringify(title.slice(0, 60))} text=${JSON.stringify(tx.slice(0, 60))} class=${JSON.stringify(cls.slice(0, 100))}`);
+                i++;
+            }
+        } catch (_) {}
+        block.push(`-- BUTTONS --`);
+        if (buttons.length === 0) block.push('  (none)');
+        else block.push(...buttons);
+        block.push('');
+
+        // Ancestor chain (up to 4 levels)
+        let p = node.parentElement;
+        for (let d = 1; d <= 4 && p; d++, p = p.parentElement) {
+            block.push(`-- ANCESTOR depth=${d} --`);
+            block.push(`  tag: <${p.tagName.toLowerCase()}>`);
+            const aAttrs = [];
+            collectInterestingAttrs(p, `a${d}`, aAttrs);
+            if (aAttrs.length) block.push(...aAttrs); else block.push('  (no interesting attributes)');
+        }
+        block.push('');
+
+        block.push(`-- OUTERHTML HEAD (first 700 chars) --`);
+        block.push((node.outerHTML || '').slice(0, 700));
+        block.push('');
+        block.push('');
+
+        debugBuffer.push(block.join('\n'));
+    }
+
     // ===== CAPTURE WHAT'S CURRENTLY IN THE DOM =====
     function captureVisible(container) {
         const containerRect = container.getBoundingClientRect();
@@ -1032,9 +1174,10 @@
                 const rect = node.getBoundingClientRect();
                 y = rect.top - containerRect.top + scrollY;
             } catch (_) { y = scrollY; }
+            const role = guessRole(node);
             messages.set(k, {
                 html: sanitizeClone(node).outerHTML,
-                role: guessRole(node),
+                role,
                 y,
                 seq: seqCounter++,
                 tool: detectTool(text, node),
@@ -1042,6 +1185,7 @@
                 signals: captureSignals(node, text),
             });
             seenNodes.add(node);
+            recordDebug(node, text, role);
         }
     }
 
@@ -1755,6 +1899,7 @@ if(collapseBtn){
         messages.clear(); seqCounter = 0; order = [];
         messagesParent = null;
         seenNodes = new WeakSet();
+        debugBuffer = [];
         // Refresh settings each run so changes from the modal apply
         // immediately, and refresh redact patterns in case they changed.
         settings = loadSettings();
@@ -1817,6 +1962,31 @@ if(collapseBtn){
                     mime = 'text/html;charset=utf-8';
             }
             download(content, ext, mime);
+            // If debug mode was on, ship a companion .debug.txt with the
+            // per-message DOM dump so the user can send it to the author
+            // and we can build a precise role detector for the current UI.
+            if (settings.debugMode && debugBuffer.length > 0) {
+                const header = [
+                    '=== Claude Code Web Archiver — DOM DIAGNOSTIC REPORT ===',
+                    `URL:          ${location.href}`,
+                    `Generated:    ${new Date().toISOString()}`,
+                    `Script ver:   ${VERSION}`,
+                    `Total msgs:   ${debugBuffer.length}`,
+                    `Detected model: ${detectedModel || '(none)'}`,
+                    '',
+                    'Purpose:  expose the DOM signals the host page uses to',
+                    '          mark user vs assistant, so the role detector',
+                    '          can be tuned to the actual structure (not',
+                    '          guesswork).',
+                    '',
+                    'Privacy:  this file contains 200-char text previews of',
+                    '          each message. Review before sharing.',
+                    '',
+                    '=========================================================',
+                    '',
+                ].join('\n');
+                download(header + debugBuffer.join('\n'), 'debug.txt', 'text/plain;charset=utf-8');
+            }
             setProgress(T.done(order.length, imgMap.size), true);
             recordArchive(order.length, imgMap.size);
             // Always remember which keys we've now archived for this URL,
@@ -2021,6 +2191,8 @@ if(collapseBtn){
   <label><input type="checkbox" data-k="redactSecrets"> <span>${esc(T.settingsRedact)}</span></label>
   <label class="block"><textarea data-k="secretPatterns" spellcheck="false"></textarea></label>
   <div class="hint">${esc(T.settingsRedactHint)}</div>
+  <label><input type="checkbox" data-k="debugMode"> <span>${esc(T.settingsDebug)}</span></label>
+  <div class="hint">${esc(T.settingsDebugHint)}</div>
   <div class="actions">
     <button type="button" class="secondary" data-act="cancel">${esc(T.settingsClose)}</button>
     <button type="button" data-act="save">${esc(T.settingsSave)}</button>

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-06-02
+
+### Added
+- **Debug mode (DOM diagnostic export).** New toggle in Settings —
+  off by default. When enabled, the next archive additionally saves a
+  `<title>.debug.txt` file containing, for every captured message:
+  - text preview (200 chars)
+  - node tag + every `data-*` / `aria-*` / `role` / `class` / `id` attribute
+  - 20+ computed CSS properties (`backgroundColor`, `alignSelf`,
+    `textAlign`, `margin*`, `width`, `fontFamily`, etc.)
+  - geometry (`rect.left/right/width` for the node and its parent)
+  - all `<img>` elements (alt, src, class) and avatar-like containers
+  - all `<button>` / `[role=button]` (aria-label, title, text, class)
+  - ancestor chain up to 4 levels (tag + interesting attributes)
+  - first 700 chars of `outerHTML`
+
+  Purpose: rather than continue guessing at how Claude Code Web marks
+  user vs assistant turns, the user can enable debug, run one archive,
+  and share the `.debug.txt`. The author then writes a detector against
+  the real DOM signals instead of speculative selectors.
+
+  Privacy note in the file header reminds the user that text previews
+  are included; review before sharing.
+
 ## [1.9.0] - 2026-06-02
 
 ### Fixed
