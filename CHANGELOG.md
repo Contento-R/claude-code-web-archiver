@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] - 2026-06-08
+
+### Fixed
+- **"No code" toggle was stuck "on" silently between runs.** The
+  resume system stored `skipCode` / `fastMode` in its localStorage
+  snapshot and v1.6.0 onwards forcibly restored them on every Archive
+  click. A snapshot left over from one earlier accidental click of
+  No-code kept re-applying code stripping to every subsequent archive
+  — and because the snapshot's messages were already pre-stripped, the
+  output stayed stripped even after panel toggles flipped back.
+  - Resume now ONLY kicks in when the snapshot's saved toggles match
+    the user's current panel state. Otherwise the snapshot is treated
+    as stale and discarded.
+  - `skipCode` / `fastMode` are no longer forcibly read from the
+    snapshot — the user's current panel toggles are authoritative.
+  - Cancelling an archive (Esc, Stop button, or overlay Cancel) now
+    clears the resume snapshot. Previously a cancel left stale state
+    behind for the next click to silently resume.
+
+### Changed
+- **"View releases" button now opens the CHANGELOG** instead of the
+  `/releases` page on GitHub, which is empty until proper releases
+  with notes are cut. Renamed to "View changelog" / "История версий"
+  to match. The CHANGELOG on `main` is the canonical version history.
+
 ## [1.11.0] - 2026-06-08
 
 ### Fixed (role detection — verified against real DOM)

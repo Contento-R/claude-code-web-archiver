@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.0
+// @version      1.11.1
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.0';
+    const VERSION = '1.11.1';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -112,7 +112,7 @@
         checkUpdates: 'Check for updates',
         checkingUpdates: 'Checking…',
         noUpdates: 'You are on the latest version',
-        viewReleases: 'View releases',
+        viewReleases: 'View changelog',
         settingsDebug: 'Debug mode (also save a DOM diagnostic file)',
         settingsDebugHint: 'When enabled, the next archive run additionally saves a .debug.txt file containing each captured message\'s DOM structure (classes, role attributes, computed styles, avatars, buttons, ancestor chain). Share that file with the script author so the role detector can be tuned for the current Claude Code Web build. Disabled by default. The file contains text previews of your messages — review it before sharing.',
     };
@@ -191,7 +191,7 @@
             checkUpdates: 'Проверить обновления',
             checkingUpdates: 'Проверяю…',
             noUpdates: 'У вас актуальная версия',
-            viewReleases: 'Релизы на GitHub',
+            viewReleases: 'История версий',
             settingsDebug: 'Debug-режим (сохраняет диагностический файл DOM)',
             settingsDebugHint: 'При включении следующая архивация сгенерирует дополнительный файл .debug.txt с разметкой каждого захваченного сообщения (классы, role-атрибуты, computed styles, аватары, кнопки, цепочка родителей). Пришли этот файл автору скрипта, чтобы настроить детектор ролей под текущую сборку Claude Code Web. По умолчанию выключено. Файл содержит превью текста твоих сообщений — посмотри его перед отправкой.',
         },
@@ -1977,16 +1977,27 @@ if(collapseBtn){
         knownKeys = loadKnownKeys();
         onlyNewActiveForRun = !!settings.onlyNew;
         // Auto-resume: if a snapshot exists for this URL, pick up where
-        // we left off — no popup. The brief notice tells the user.
+        // we left off — no popup. We ONLY resume when the snapshot was
+        // saved with the same panel toggles (No-code / Fast) the user
+        // currently has. Otherwise the snapshot is considered stale and
+        // discarded, because pre-stripped-code messages from an older
+        // run would otherwise silently take effect on a fresh archive.
+        // Previously we forcibly restored skipCode/fastMode from the
+        // snapshot — that was the source of the "code keeps being
+        // stripped even though I didn't press No-code" bug.
         const snapshot = loadResumeSnapshot();
         let resuming = false;
         if (snapshot && Array.isArray(snapshot.messages) && snapshot.messages.length > 0) {
-            resuming = true;
-            for (const [k, v] of snapshot.messages) messages.set(k, v);
-            seqCounter = snapshot.seqCounter || messages.size;
-            if (typeof snapshot.fastMode === 'boolean') fastMode = snapshot.fastMode;
-            if (typeof snapshot.skipCode === 'boolean') skipCode = snapshot.skipCode;
-            syncToggles();
+            const sameToggles = (!!snapshot.skipCode === !!skipCode) &&
+                                (!!snapshot.fastMode === !!fastMode);
+            if (sameToggles) {
+                resuming = true;
+                for (const [k, v] of snapshot.messages) messages.set(k, v);
+                seqCounter = snapshot.seqCounter || messages.size;
+            } else {
+                clearResumeSnapshot();
+                console.debug('[archiver] discarded stale resume snapshot — panel toggles changed since it was saved');
+            }
         }
         setArchiveBtnBusy(true);
         showOverlay();
@@ -2001,7 +2012,13 @@ if(collapseBtn){
             } else {
                 setProgress(T.starting, true);
                 await autoScroll(chatContainer);
-                if (cancelled) { setProgress(T.cancelled, true); return; }
+                if (cancelled) {
+                    setProgress(T.cancelled, true);
+                    // Clear the resume snapshot — a cancelled run shouldn't
+                    // silently auto-resume on the next click.
+                    clearResumeSnapshot();
+                    return;
+                }
             }
             order = buildOrder();
             // Re-classify roles if capture-time detection produced no mix
@@ -2011,7 +2028,11 @@ if(collapseBtn){
             normalizeRoles();
             setProgress(T.scrollDone(order.length), true);
             imgMap = await downloadAllImages();
-            if (cancelled) { setProgress(T.cancelled, true); return; }
+            if (cancelled) {
+                setProgress(T.cancelled, true);
+                clearResumeSnapshot();
+                return;
+            }
             setProgress(T.building, true);
             // Dispatch to the configured output format.
             let content, ext, mime;
@@ -2369,7 +2390,11 @@ if(collapseBtn){
         };
         const releasesBtn = q('[data-act=view-releases]');
         if (releasesBtn) releasesBtn.onclick = () => {
-            window.open('https://github.com/Contento-R/claude-code-web-archiver/releases', '_blank', 'noopener');
+            // Point at the CHANGELOG on `main` — it has the full version
+            // history. The GitHub /releases page would be empty until
+            // proper releases (with notes) are cut from tags; until then
+            // the changelog is the canonical source of "what changed".
+            window.open('https://github.com/Contento-R/claude-code-web-archiver/blob/main/CHANGELOG.md', '_blank', 'noopener');
         };
         modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
         // Esc closes the modal (don't conflict with cancel-archive, which
