@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-05-21
+
+### Fixed (critical)
+- **Role detection: all-Claude failure mode.** On the current Claude Code
+  Web build, the capture-time detector returned `assistant` for every
+  message because the page exposes no role attributes and both sides use
+  identical visual alignment. A new `normalizeRoles()` post-pass kicks
+  in whenever the user/assistant split is degenerate:
+  1. messages with a strong assistant signal (`tool`, `<pre>`, headings,
+     lists, tables) are pinned to assistant first;
+  2. remaining messages are clustered by computed `backgroundColor` —
+     the majority colour is assistant, the minority is user;
+  3. if there's only one background colour, plain-text-only blocks under
+     ~600 chars become user;
+  4. a final guarantee: if no message ended up as user, the very first
+     in chronological order is forced to user (every session starts
+     with a user prompt).
+
+### Added
+- **Update notifier (#2 follow-up).** Daily background check fetches
+  the userscript on GitHub `main`, compares `@version`, and on a newer
+  release surfaces (a) a yellow dot on the gear button, (b) a notice
+  with an "Install" button at the top of the settings modal. The
+  install button opens the raw URL — Tampermonkey then offers the
+  normal reinstall prompt. `@connect raw.githubusercontent.com` added.
+- **Auto-collapse to a circle (#3).** 3 s after the cursor / focus
+  leaves the panel, it shrinks to a small green circle with the ⬇
+  glyph. Hover or focus expands it back. Auto-collapse is suspended
+  while an archive run is in progress and while the settings modal is
+  open. Drag still works (whole circle is a drag handle).
+
+### Changed
+- **Compact panel (#1).** Buttons are now icon-only squares (~20–28 px
+  wide), drag handle is thinner, padding tightened. Reduces the panel
+  footprint by ~60% while keeping all five controls accessible.
+- The Archive button's tooltip switches to "Archiving…" during a run
+  and back to the recent-archives history afterwards.
+- Drag now starts on `pointerdown` anywhere on the panel except
+  interactive children, so the collapsed circle is draggable as a
+  single unit.
+
 ## [1.6.0] - 2026-05-21
 
 ### Added

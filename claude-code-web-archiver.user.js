@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.6.0
+// @version      1.7.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -22,6 +22,7 @@
 // @connect      anthropic.com
 // @connect      cloudfront.net
 // @connect      amazonaws.com
+// @connect      raw.githubusercontent.com
 // @connect      self
 // @run-at       document-idle
 // ==/UserScript==
@@ -33,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.6.0';
+    const VERSION = '1.7.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -100,6 +101,10 @@
         showResponse: 'Show response',
         hideResponse: 'Hide response',
         resumePrompt: (n, minutes) => `An interrupted archive was found for this session (${n} messages, ${minutes} min ago).\n\nResume from where it stopped?`,
+        updateAvailable: (v) => `New version available: v${v}`,
+        updateInstall: 'Install',
+        updateDismiss: 'Dismiss',
+        updateBadgeTitle: (v) => `Update available — v${v}. Open settings to install.`,
     };
     const I18N = {
         en: I18N_EN,
@@ -165,6 +170,10 @@
             showResponse: 'Показать ответ',
             hideResponse: 'Скрыть ответ',
             resumePrompt: (n, minutes) => `Найден прерванный архив для этой сессии (${n} сообщений, ${minutes} мин назад).\n\nПродолжить с того места?`,
+            updateAvailable: (v) => `Доступна новая версия: v${v}`,
+            updateInstall: 'Установить',
+            updateDismiss: 'Скрыть',
+            updateBadgeTitle: (v) => `Доступна обновлённая версия — v${v}. Открой настройки, чтобы установить.`,
         },
         de: {
             htmlLang: 'de',
@@ -446,6 +455,71 @@
     function clearResumeSnapshot() {
         try { localStorage.removeItem(RESUME_KEY); } catch (_) {}
         lastResumeSaveTs = 0;
+    }
+
+    // ===== UPDATE CHECK =====
+    // Daily check of the published userscript on GitHub `main`. If a newer
+    // semver is found, a small dot is added to the panel and to the
+    // settings button; a notice with an "Install" link appears at the top
+    // of the settings modal.
+    const UPDATE_CHECK_KEY = 'cc-arch-last-update-check';
+    const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    const UPDATE_RAW_URL = 'https://raw.githubusercontent.com/Contento-R/claude-code-web-archiver/main/claude-code-web-archiver.user.js';
+    let updateAvailableVersion = null;
+    function compareVersions(a, b) {
+        const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0);
+        const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0);
+        for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+            const av = pa[i] || 0, bv = pb[i] || 0;
+            if (av > bv) return 1;
+            if (av < bv) return -1;
+        }
+        return 0;
+    }
+    function showUpdateBadge() {
+        if (panel) panel.classList.add('has-update');
+        if (settingsBtn) {
+            settingsBtn.classList.add('has-update');
+            try { settingsBtn.title = T.updateBadgeTitle(updateAvailableVersion); } catch (_) {}
+        }
+    }
+    function checkForUpdate() {
+        if (typeof GM_xmlhttpRequest === 'undefined') return;
+        let last = 0;
+        try { last = parseInt(localStorage.getItem(UPDATE_CHECK_KEY) || '0', 10) || 0; } catch (_) {}
+        if (Date.now() - last < UPDATE_CHECK_INTERVAL_MS) {
+            // Skip network — but still surface the badge if we already
+            // remembered a newer version from an earlier check.
+            try {
+                const cached = localStorage.getItem('cc-arch-latest-version') || '';
+                if (cached && compareVersions(cached, VERSION) > 0) {
+                    updateAvailableVersion = cached;
+                    showUpdateBadge();
+                }
+            } catch (_) {}
+            return;
+        }
+        try { localStorage.setItem(UPDATE_CHECK_KEY, String(Date.now())); } catch (_) {}
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: UPDATE_RAW_URL,
+                timeout: 10000,
+                onload: (r) => {
+                    if (!r || r.status < 200 || r.status >= 300 || !r.responseText) return;
+                    const m = r.responseText.match(/^\/\/\s*@version\s+(\d+\.\d+\.\d+)/m);
+                    if (!m) return;
+                    const latest = m[1];
+                    try { localStorage.setItem('cc-arch-latest-version', latest); } catch (_) {}
+                    if (compareVersions(latest, VERSION) > 0) {
+                        updateAvailableVersion = latest;
+                        showUpdateBadge();
+                    }
+                },
+                onerror: () => {},
+                ontimeout: () => {},
+            });
+        } catch (_) { /* ignore */ }
     }
 
     // ===== PER-MESSAGE METADATA DETECTION =====
@@ -902,9 +976,119 @@
                 seq: seqCounter++,
                 tool: detectTool(text, node),
                 time: detectTimestamp(node),
+                signals: captureSignals(node, text),
             });
             seenNodes.add(node);
         }
+    }
+
+    // ===== POST-CAPTURE SIGNALS FOR ROLE NORMALIZATION =====
+    function captureSignals(node, text) {
+        let bg = '', textAlign = '', alignSelf = '';
+        try {
+            const cs = getComputedStyle(node);
+            bg = cs.backgroundColor || '';
+            textAlign = cs.textAlign || '';
+            alignSelf = cs.alignSelf || '';
+        } catch (_) { /* ignore */ }
+        return {
+            bg,
+            textAlign,
+            alignSelf,
+            len: (text || '').length,
+            hasPre: !!(node.querySelector && node.querySelector('pre')),
+            hasH: !!(node.querySelector && node.querySelector('h1,h2,h3,h4,h5,h6')),
+            hasList: !!(node.querySelector && node.querySelector('ul,ol')),
+            hasImg: !!(node.querySelector && node.querySelector('img')),
+            hasCode: !!(node.querySelector && node.querySelector('code')),
+            hasTable: !!(node.querySelector && node.querySelector('table')),
+        };
+    }
+
+    // ===== ROLE NORMALIZATION =====
+    // Post-capture pass that re-classifies messages when the capture-time
+    // detector failed (typically when Claude Code Web exposes no role
+    // attributes and visual alignment is identical for both sides).
+    //
+    // Strategy:
+    //   1. If we already have a healthy mix of user / assistant, trust
+    //      the capture-time detection.
+    //   2. Otherwise rebuild roles from cross-message signals:
+    //      - tool calls / markdown structure / code = strong assistant
+    //      - background-color clusters split user vs assistant
+    //      - if no bg differentiation: short plain text = user
+    //   3. As a last guarantee against an all-assistant output, force
+    //      the very first message in chronological order to "user"
+    //      (every Claude Code session starts with a user prompt).
+    function normalizeRoles() {
+        const entries = [...messages.values()];
+        if (entries.length < 2) return 0;
+
+        const userCount = entries.filter(e => e.role === 'user').length;
+        const total = entries.length;
+        const balanced = userCount >= Math.max(1, Math.floor(total * 0.05))
+                      && userCount <= total - 1;
+        if (balanced) return 0;
+
+        let changed = 0;
+        const isStrongAssistant = (e) => {
+            if (e.tool) return true;
+            const s = e.signals;
+            if (!s) return false;
+            return s.hasPre || s.hasH || s.hasList || s.hasTable;
+        };
+
+        // Step 1: mark every message with a strong assistant signal.
+        for (const e of entries) {
+            if (isStrongAssistant(e)) {
+                if (e.role !== 'assistant') { e.role = 'assistant'; changed++; }
+            }
+        }
+
+        // Step 2: differentiate by background-color cluster.
+        const TRANSPARENT_BG = new Set(['', 'transparent', 'rgba(0, 0, 0, 0)', 'rgba(0,0,0,0)']);
+        const bgCount = new Map();
+        for (const e of entries) {
+            const bg = e.signals && e.signals.bg;
+            if (!bg || TRANSPARENT_BG.has(bg)) continue;
+            bgCount.set(bg, (bgCount.get(bg) || 0) + 1);
+        }
+        if (bgCount.size >= 2) {
+            const sorted = [...bgCount.entries()].sort((a, b) => b[1] - a[1]);
+            const majorityBg = sorted[0][0];
+            for (const e of entries) {
+                if (isStrongAssistant(e)) continue;
+                const bg = e.signals && e.signals.bg;
+                if (!bg || TRANSPARENT_BG.has(bg)) continue;
+                if (bg !== majorityBg) {
+                    if (e.role !== 'user') { e.role = 'user'; changed++; }
+                } else {
+                    if (e.role !== 'assistant') { e.role = 'assistant'; changed++; }
+                }
+            }
+        } else {
+            // Step 2b: no color differentiation — use plain-text length
+            // heuristic. Short plain-text-only blocks = user prompts.
+            for (const e of entries) {
+                if (isStrongAssistant(e)) continue;
+                const s = e.signals;
+                if (!s) continue;
+                if (!s.hasPre && !s.hasH && !s.hasList && !s.hasTable && !s.hasImg && s.len < 600) {
+                    if (e.role !== 'user') { e.role = 'user'; changed++; }
+                }
+            }
+        }
+
+        // Step 3: guarantee at least one user message — the conversation
+        // had to start with one.
+        const newUserCount = entries.filter(e => e.role === 'user').length;
+        if (newUserCount === 0) {
+            const first = entries.slice().sort((a, b) => a.y - b.y || a.seq - b.seq)[0];
+            if (first) { first.role = 'user'; changed++; }
+        }
+
+        console.debug('[archiver] normalizeRoles updated', changed, 'of', total, 'messages');
+        return changed;
     }
 
     function buildOrder() {
@@ -1447,6 +1631,11 @@ if(collapseBtn){
                 if (cancelled) { setProgress(T.cancelled, true); return; }
             }
             order = buildOrder();
+            // Re-classify roles if capture-time detection produced no mix
+            // (e.g. every message ended up as "assistant"). Uses bg-color
+            // clusters + structure heuristics, plus a final guarantee that
+            // at least one message is "user".
+            normalizeRoles();
             setProgress(T.scrollDone(order.length), true);
             imgMap = await downloadAllImages();
             if (cancelled) { setProgress(T.cancelled, true); return; }
@@ -1502,16 +1691,25 @@ if(collapseBtn){
         const s = document.createElement('style');
         s.id = 'cc-arch-styles';
         s.textContent = `
-.cc-arch-panel{position:fixed;bottom:20px;right:20px;background:#16a34a;color:#fff;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.4);z-index:2147483647;display:flex;align-items:stretch;padding:2px;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;user-select:none;touch-action:none}
-.cc-arch-drag{width:12px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.75);cursor:grab;font-size:10px;line-height:1;letter-spacing:-1px;touch-action:none}
+.cc-arch-panel{position:fixed;bottom:18px;right:18px;background:#16a34a;color:#fff;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.4);z-index:2147483647;display:flex;align-items:stretch;padding:1px;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;user-select:none;touch-action:none;transition:width .18s ease,height .18s ease,border-radius .18s ease,padding .18s ease;overflow:hidden}
+.cc-arch-drag{width:8px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.55);cursor:grab;font-size:9px;line-height:1;letter-spacing:-1px;touch-action:none;flex:none}
 .cc-arch-drag:active{cursor:grabbing}
-.cc-arch-panel button{background:rgba(255,255,255,.14);color:#fff;border:none;border-radius:5px;height:24px;padding:0 8px;margin:1px;cursor:pointer;font:inherit;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
-.cc-arch-panel button:hover{background:rgba(255,255,255,.26)}
+.cc-arch-panel button{background:rgba(255,255,255,.14);color:#fff;border:none;border-radius:3px;height:20px;width:24px;padding:0;margin:1px;cursor:pointer;font:14px/1 inherit;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;position:relative;flex:none}
+.cc-arch-panel button#cc-arch-archive{width:28px}
+.cc-arch-panel button:hover{background:rgba(255,255,255,.28)}
 .cc-arch-panel button.active{background:#052e1a;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
 .cc-arch-panel button:disabled{opacity:.7;cursor:not-allowed}
 .cc-arch-panel button.busy{background:#0b3a25}
+.cc-arch-panel button.has-update::after{content:'';position:absolute;top:-2px;right:-2px;width:8px;height:8px;background:#fbbf24;border-radius:50%;border:1px solid #14532d;box-sizing:border-box}
 .cc-arch-spinner{display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:cc-arch-spin 700ms linear infinite}
 @keyframes cc-arch-spin{to{transform:rotate(360deg)}}
+.cc-arch-panel.collapsed{width:34px;height:34px;border-radius:50%;padding:0;align-items:center;justify-content:center;cursor:grab;position:fixed}
+.cc-arch-panel.collapsed:active{cursor:grabbing}
+.cc-arch-panel.collapsed > *{display:none !important}
+.cc-arch-panel.collapsed::before{content:'⬇';color:#fff;font-size:17px;font-weight:700;display:block;pointer-events:none}
+.cc-arch-panel.collapsed.has-update::after{content:'';position:absolute;top:-2px;right:-2px;width:10px;height:10px;background:#fbbf24;border-radius:50%;border:2px solid #14532d;box-sizing:border-box;display:block !important}
+.cc-arch-update-notice{background:rgba(251,191,36,.16);border:1px solid #fbbf24;color:#fde68a;padding:8px 12px;border-radius:6px;margin:0 0 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px}
+.cc-arch-update-notice button{background:#fbbf24;color:#0f1115;border:none;border-radius:4px;padding:5px 12px;cursor:pointer;font-weight:700;font-size:12px}
 .cc-arch-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483646;display:flex;align-items:flex-end;justify-content:center;padding-bottom:90px;pointer-events:none}
 .cc-arch-card{background:#171a21;color:#e6e8eb;border:1px solid #2a2f3a;border-radius:12px;padding:14px 18px;min-width:320px;max-width:80vw;font:14px sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.5);pointer-events:auto;position:relative}
 .cc-arch-card .p{margin-bottom:10px}
@@ -1572,9 +1770,16 @@ if(collapseBtn){
         if (!archiveBtn) return;
         archiveBtn.disabled = isBusy;
         archiveBtn.classList.toggle('busy', isBusy);
-        archiveBtn.innerHTML = isBusy
-            ? `<span class="cc-arch-spinner"></span> <span>${esc(T.archiving)}</span>`
-            : `⬇ <span>${esc(T.archive)}</span>`;
+        if (isBusy) {
+            archiveBtn.innerHTML = `<span class="cc-arch-spinner"></span>`;
+            archiveBtn.title = T.archiving;
+            // Keep the panel expanded during the run so the user can see
+            // the progress overlay and reach the Cancel button.
+            expandPanel();
+        } else {
+            archiveBtn.textContent = '⬇';
+            updateArchiveTooltip();
+        }
     }
 
     // ===== SETTINGS MODAL =====
@@ -1584,8 +1789,15 @@ if(collapseBtn){
         modal.className = 'cc-arch-modal';
         modal.setAttribute('role', 'dialog');
         modal.setAttribute('aria-modal', 'true');
+        const updateNotice = updateAvailableVersion
+            ? `<div class="cc-arch-update-notice">
+                <span>${esc(T.updateAvailable(updateAvailableVersion))}</span>
+                <button type="button" data-act="install-update">${esc(T.updateInstall)}</button>
+              </div>`
+            : '';
         modal.innerHTML = `<div class="cc-arch-modal-card">
   <h2>${esc(T.settingsTitle)}</h2>
+  ${updateNotice}
   <label class="block"><span>${esc(T.settingsFormat)}</span>
     <select data-k="outputFormat">
       <option value="html">${esc(T.settingsFormatHtml)}</option>
@@ -1657,6 +1869,12 @@ if(collapseBtn){
         }
         q('[data-act=cancel]').onclick = close;
         q('[data-act=save]').onclick = commit;
+        const installUpdate = q('[data-act=install-update]');
+        if (installUpdate) installUpdate.onclick = () => {
+            // Open the raw userscript URL — Tampermonkey/Violentmonkey
+            // intercepts it and offers the reinstall prompt.
+            window.open(UPDATE_RAW_URL, '_blank', 'noopener');
+        };
         modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
         // Esc closes the modal (don't conflict with cancel-archive, which
         // only triggers when `busy` is true).
@@ -1755,7 +1973,11 @@ if(collapseBtn){
         document.addEventListener('pointercancel', endDrag, { passive: true });
     }
     function makeDraggable(p, handle) {
-        handle.addEventListener('pointerdown', (e) => {
+        // Drag from the whole panel (including the collapsed circle), but
+        // skip presses that hit an interactive child (button/input/etc.) so
+        // clicks still work normally.
+        p.addEventListener('pointerdown', (e) => {
+            if (e.target && e.target.closest && e.target.closest('button, input, select, textarea, a')) return;
             const rect = p.getBoundingClientRect();
             p.style.left = rect.left + 'px';
             p.style.top = rect.top + 'px';
@@ -1768,7 +1990,7 @@ if(collapseBtn){
                 startLeft: rect.left,
                 startTop: rect.top,
             };
-            try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+            try { p.setPointerCapture(e.pointerId); } catch (_) {}
             e.preventDefault();
         });
         try {
@@ -1795,26 +2017,27 @@ if(collapseBtn){
 
         archiveBtn = document.createElement('button');
         archiveBtn.type = 'button';
-        archiveBtn.innerHTML = `⬇ <span>${esc(T.archive)}</span>`;
+        archiveBtn.id = 'cc-arch-archive';
+        archiveBtn.textContent = '⬇';
         archiveBtn.onclick = run;
         panel.appendChild(archiveBtn);
 
         fastBtn = document.createElement('button');
         fastBtn.type = 'button';
-        fastBtn.innerHTML = `⚡ <span>${esc(T.fast)}</span>`;
+        fastBtn.textContent = '⚡';
         fastBtn.onclick = () => { fastMode = !fastMode; syncToggles(); };
         panel.appendChild(fastBtn);
 
         noCodeBtn = document.createElement('button');
         noCodeBtn.type = 'button';
-        noCodeBtn.innerHTML = `📝 <span>${esc(T.noCode)}</span>`;
+        noCodeBtn.textContent = '📝';
         noCodeBtn.onclick = () => { skipCode = !skipCode; syncToggles(); };
         panel.appendChild(noCodeBtn);
 
         settingsBtn = document.createElement('button');
         settingsBtn.type = 'button';
         settingsBtn.title = T.settingsTitleAttr;
-        settingsBtn.innerHTML = `⚙`;
+        settingsBtn.textContent = '⚙';
         settingsBtn.onclick = showSettingsModal;
         panel.appendChild(settingsBtn);
 
@@ -1822,10 +2045,41 @@ if(collapseBtn){
         makeDraggable(panel, drag);
         syncToggles();
         updateArchiveTooltip();
+        if (updateAvailableVersion) showUpdateBadge();
+        // Auto-collapse: when the mouse leaves the panel and it isn't busy
+        // or modal-open, shrink to a small green circle. Re-expand on hover
+        // or keyboard focus.
+        panel.addEventListener('pointerenter', expandPanel);
+        panel.addEventListener('pointerleave', scheduleCollapse);
+        panel.addEventListener('focusin', expandPanel);
+        panel.addEventListener('focusout', scheduleCollapse);
+        scheduleCollapse();
         // Saved position from a previous (possibly larger) window may now be
         // off-screen; clamp on next animation frame after the panel has been
         // measured.
         requestAnimationFrame(clampPanelToViewport);
+    }
+
+    // ===== AUTO-COLLAPSE =====
+    let collapseTimer = null;
+    const COLLAPSE_DELAY_MS = 3000;
+    function scheduleCollapse() {
+        if (!panel) return;
+        if (collapseTimer) clearTimeout(collapseTimer);
+        collapseTimer = setTimeout(() => {
+            collapseTimer = null;
+            if (!panel) return;
+            // Don't shrink during a run, when a modal is open, or while the
+            // user is still hovering.
+            if (busy) return;
+            if (document.querySelector('.cc-arch-modal')) return;
+            try { if (panel.matches(':hover')) return; } catch (_) {}
+            panel.classList.add('collapsed');
+        }, COLLAPSE_DELAY_MS);
+    }
+    function expandPanel() {
+        if (collapseTimer) { clearTimeout(collapseTimer); collapseTimer = null; }
+        if (panel) panel.classList.remove('collapsed');
     }
 
     // Keep the panel alive across SPA-style re-renders.
@@ -1872,6 +2126,9 @@ if(collapseBtn){
         installHotkeys();
         makePanel();
         installPanelKeepalive();
+        // Defer the network check briefly so we don't compete with the
+        // host page's own load.
+        setTimeout(checkForUpdate, 4000);
     }
     if (document.body) init(); else document.addEventListener('DOMContentLoaded', init);
 })();
