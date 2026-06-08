@@ -29,7 +29,13 @@ jobs:
           created=0
           skipped=0
           git log --reverse --format='%H %s' | while read -r sha subject; do
-            tag=$(printf '%s' "$subject" | grep -oE '^v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            # Match vX.Y.Z anywhere in the subject — the v1.0.0 commit
+            # reads "Initial public release of … v1.0.0" with the version at
+            # the end. Since git log --reverse goes oldest-first and we
+            # `gh release view` before creating, the first commit
+            # mentioning a version becomes its release; later mentions
+            # (e.g. "Polish v1.7.0: …") are no-ops.
+            tag=$(printf '%s' "$subject" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
             if [ -z "$tag" ]; then continue; fi
             if gh release view "$tag" >/dev/null 2>&1; then
               echo "skip $tag (already exists)"
