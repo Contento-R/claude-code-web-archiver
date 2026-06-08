@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-05-21
+
+### Added
+- **Settings cog (⚙).** A 4th button on the panel opens a modal where you
+  can configure all of the new options below; saved to `localStorage`,
+  re-read on each archive run.
+- **"Only new" mode (#21).** When enabled, skips messages already captured
+  in earlier archives of the same URL. Known keys are stored per-URL in
+  `localStorage` (capped at 5000 keys, ~1 MB) and updated after every
+  successful run regardless of the toggle, so toggling it on later picks
+  up where you left off.
+- **Range archiving (#22).** "From #" and "To #" inputs in settings export
+  only the messages whose chronological number falls in the range. Empty
+  fields mean no limit on that side.
+- **Local-only network mode (#23).** Toggling this disables the
+  cross-origin `GM_xmlhttpRequest` fallback for image fetches. Images
+  that need it stay as remote URLs in the HTML instead of being inlined.
+- **Secret redaction (#24).** Toggle plus a textarea of newline-separated
+  regular expressions. Each match in the captured text is replaced with
+  asterisks. Defaults cover common API keys (OpenAI/Anthropic `sk-*`,
+  GitHub PATs `ghp_*/gho_*/ghu_*/ghs_*/github_pat_*`, AWS `AKIA*`). Regex
+  validation runs on save — invalid patterns are rejected with a list.
+
+### Implementation notes
+- Redaction walks text nodes via `TreeWalker` so a regex can never corrupt
+  tag markup or attribute values.
+- Range filtering happens at HTML-build time, not at capture, so the
+  underlying message store stays complete (useful if you want to re-run
+  with a different range without re-scrolling).
+
 ## [1.2.0] - 2026-05-21
 
 ### Added

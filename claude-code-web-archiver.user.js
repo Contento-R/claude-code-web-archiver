@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.2.0
+// @version      1.3.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -33,7 +33,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.2.0';
+    const VERSION = '1.3.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -74,6 +74,20 @@
         historyTitle: 'Recent archives',
         historyEmpty: 'No archives yet',
         historyItem: (when, n) => `${when} — ${n} messages`,
+        settings: 'Settings',
+        settingsTitleAttr: 'Open archive settings',
+        settingsTitle: 'Archive settings',
+        settingsSave: 'Save',
+        settingsClose: 'Cancel',
+        settingsOnlyNew: 'Only archive new messages since the previous run for this session',
+        settingsOnlyNewHint: 'Skips messages already captured in earlier archives for this URL.',
+        settingsRangeFrom: 'From #',
+        settingsRangeTo: 'To #',
+        settingsRangeHint: 'Export only messages whose number is in this range. Leave blank for no limit.',
+        settingsLocalOnly: 'Local-only network mode',
+        settingsLocalOnlyHint: 'Skip the cross-origin screenshot fallback (GM_xmlhttpRequest). Images that need it will not be embedded.',
+        settingsRedact: 'Redact secrets matching the patterns below',
+        settingsRedactHint: 'One JavaScript regular expression per line. Each match is replaced with asterisks in the exported HTML.',
     };
     const I18N = {
         en: I18N_EN,
@@ -113,6 +127,20 @@
             historyTitle: 'Последние архивы',
             historyEmpty: 'Архивов пока нет',
             historyItem: (when, n) => `${when} — сообщений: ${n}`,
+            settings: 'Настройки',
+            settingsTitleAttr: 'Открыть настройки архивации',
+            settingsTitle: 'Настройки архивации',
+            settingsSave: 'Сохранить',
+            settingsClose: 'Отмена',
+            settingsOnlyNew: 'Архивировать только новые сообщения с прошлого запуска для этой сессии',
+            settingsOnlyNewHint: 'Пропускает сообщения, уже захваченные в предыдущих архивах этого URL.',
+            settingsRangeFrom: 'С номера #',
+            settingsRangeTo: 'По номер #',
+            settingsRangeHint: 'Выгружать только сообщения с номерами в этом диапазоне. Пусто = без ограничения.',
+            settingsLocalOnly: 'Локальный режим сети',
+            settingsLocalOnlyHint: 'Не использовать cross-origin fallback (GM_xmlhttpRequest). Картинки, которым он нужен, не будут встроены.',
+            settingsRedact: 'Скрывать секреты по паттернам ниже',
+            settingsRedactHint: 'Одно JavaScript-регулярное выражение в строке. Каждое совпадение заменяется на звёздочки в HTML.',
         },
         de: {
             htmlLang: 'de',
@@ -284,6 +312,68 @@
     let messagesParent = null;
     let seenNodes = new WeakSet();
     const cfg = () => (fastMode ? CFG_FAST : CFG_NORMAL);
+
+    // ===== SETTINGS (persisted to localStorage) =====
+    const SETTINGS_KEY = 'cc-arch-settings';
+    const DEFAULT_SECRET_PATTERNS = [
+        'sk-[A-Za-z0-9_\\-]{20,}',
+        'sk-ant-[A-Za-z0-9_\\-]{20,}',
+        'ghp_[A-Za-z0-9]{20,}',
+        'gho_[A-Za-z0-9]{20,}',
+        'ghu_[A-Za-z0-9]{20,}',
+        'ghs_[A-Za-z0-9]{20,}',
+        'github_pat_[A-Za-z0-9_]{20,}',
+        'AKIA[0-9A-Z]{16}',
+    ].join('\n');
+    const DEFAULT_SETTINGS = {
+        onlyNew: false,
+        rangeFrom: null,
+        rangeTo: null,
+        localOnly: false,
+        redactSecrets: false,
+        secretPatterns: DEFAULT_SECRET_PATTERNS,
+    };
+    function loadSettings() {
+        try {
+            const raw = localStorage.getItem(SETTINGS_KEY);
+            const obj = raw ? JSON.parse(raw) : {};
+            return Object.assign({}, DEFAULT_SETTINGS, obj || {});
+        } catch (_) { return { ...DEFAULT_SETTINGS }; }
+    }
+    function saveSettings(s) {
+        try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch (_) {}
+    }
+    let settings = loadSettings();
+    let compiledRedactPatterns = [];
+    function recompileRedact() {
+        compiledRedactPatterns = [];
+        if (!settings.redactSecrets) return;
+        const lines = String(settings.secretPatterns || '').split('\n').map(l => l.trim()).filter(Boolean);
+        for (const line of lines) {
+            try { compiledRedactPatterns.push(new RegExp(line, 'g')); } catch (_) { /* skip invalid */ }
+        }
+    }
+    recompileRedact();
+
+    // ===== KNOWN KEYS (per-URL, for the "only new" mode) =====
+    function knownKeysStorageKey() {
+        return 'cc-arch-known:' + location.host + location.pathname;
+    }
+    function loadKnownKeys() {
+        try {
+            const raw = localStorage.getItem(knownKeysStorageKey());
+            return raw ? new Set(JSON.parse(raw)) : new Set();
+        } catch (_) { return new Set(); }
+    }
+    function saveKnownKeys(set) {
+        try {
+            // Keep at most 5000 keys per URL (each up to 220 chars) → ~1 MB.
+            const arr = [...set].slice(-5000);
+            localStorage.setItem(knownKeysStorageKey(), JSON.stringify(arr));
+        } catch (_) { /* quota exceeded etc. — silently skip */ }
+    }
+    let knownKeys = new Set();
+    let onlyNewActiveForRun = false;
 
     // ===== ARCHIVE HISTORY =====
     const HISTORY_KEY = 'cc-arch-history';
@@ -545,6 +635,28 @@
         return removed;
     }
 
+    // ===== SECRET REDACTION =====
+    // Walks every text node in the clone and replaces matches of compiled
+    // redact patterns with asterisks. We walk text nodes (not raw HTML)
+    // so a regex can never corrupt tag markup or attribute values.
+    function applyRedaction(clone) {
+        if (!settings.redactSecrets || compiledRedactPatterns.length === 0) return;
+        const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        let n;
+        while ((n = walker.nextNode())) nodes.push(n);
+        for (const node of nodes) {
+            let text = node.nodeValue;
+            let changed = false;
+            for (const re of compiledRedactPatterns) {
+                re.lastIndex = 0;
+                const next = text.replace(re, (m) => '*'.repeat(Math.min(m.length, 40)));
+                if (next !== text) { text = next; changed = true; }
+            }
+            if (changed) node.nodeValue = text;
+        }
+    }
+
     // ===== SANITIZE A LIVE NODE INTO PORTABLE HTML =====
     function sanitizeClone(node) {
         const clone = node.cloneNode(true);
@@ -571,6 +683,7 @@
                 if (!keep.has(n)) el.removeAttribute(n);
             }
         });
+        applyRedaction(clone);
         return clone;
     }
 
@@ -610,6 +723,10 @@
             if (text.length < min) continue;
             const k = keyOf(text);
             if (messages.has(k)) { seenNodes.add(node); continue; }
+            // "Only new" mode: skip messages already captured in prior runs
+            // for this URL. We still mark the node as seen so we don't keep
+            // re-examining it during scroll.
+            if (onlyNewActiveForRun && knownKeys.has(k)) { seenNodes.add(node); continue; }
             let y = 0;
             try {
                 const rect = node.getBoundingClientRect();
@@ -684,6 +801,9 @@
             const r = await fetch(url, { credentials: 'include' });
             if (r.ok) return await blobToDataURL(await r.blob());
         } catch (_) { /* fall through */ }
+        // Local-only mode: skip the cross-origin GM_xmlhttpRequest fallback.
+        // The image URL stays in the HTML but isn't inlined as data:.
+        if (settings.localOnly) return null;
         try {
             return await blobToDataURL(await gmGet(url));
         } catch (_) { /* fall through */ }
@@ -731,10 +851,16 @@
         const title = getTitle();
         const parts = [];
         let n = 0;
+        let exported = 0;
+        const rangeFrom = settings.rangeFrom;
+        const rangeTo = settings.rangeTo;
         for (const k of order) {
             const entry = messages.get(k);
             if (!entry) continue;
             n++;
+            if (rangeFrom && n < rangeFrom) continue;
+            if (rangeTo && n > rangeTo) continue;
+            exported++;
             const tmp = document.createElement('div');
             tmp.innerHTML = entry.html;
             tmp.querySelectorAll('img[src]').forEach(img => {
@@ -771,7 +897,7 @@ main{max-width:980px;margin:0 auto;padding:24px}
 .body details{border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:8px 0}
 .body summary{cursor:pointer;color:var(--muted)}
 `;
-        const meta = `${T.archivedLabel}: ${new Date().toLocaleString()} · ${T.messagesLabel}: ${n} · ${T.sourceLabel}: ${esc(location.href)} · ${T.parserLabel}: ${VERSION}`;
+        const meta = `${T.archivedLabel}: ${new Date().toLocaleString()} · ${T.messagesLabel}: ${exported} · ${T.sourceLabel}: ${esc(location.href)} · ${T.parserLabel}: ${VERSION}`;
         return `<!DOCTYPE html>
 <html lang="${T.htmlLang}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -802,6 +928,12 @@ main{max-width:980px;margin:0 auto;padding:24px}
         messages.clear(); seqCounter = 0; order = [];
         messagesParent = null;
         seenNodes = new WeakSet();
+        // Refresh settings each run so changes from the modal apply
+        // immediately, and refresh redact patterns in case they changed.
+        settings = loadSettings();
+        recompileRedact();
+        knownKeys = loadKnownKeys();
+        onlyNewActiveForRun = !!settings.onlyNew;
         setArchiveBtnBusy(true);
         showOverlay();
         let imgMap = new Map();
@@ -820,19 +952,25 @@ main{max-width:980px;margin:0 auto;padding:24px}
             download(html, 'html', 'text/html;charset=utf-8');
             setProgress(T.done(order.length, imgMap.size), true);
             recordArchive(order.length, imgMap.size);
+            // Always remember which keys we've now archived for this URL,
+            // regardless of whether `onlyNew` was on this run — so toggling
+            // it on later still picks up where we left off.
+            const merged = new Set([...knownKeys, ...order]);
+            saveKnownKeys(merged);
             await sleep(1500);
         } catch (e) {
             console.error('[archiver]', e);
             alert(T.error + (e.message || e));
         } finally {
             busy = false;
+            onlyNewActiveForRun = false;
             setArchiveBtnBusy(false);
             hideOverlay();
         }
     }
 
     // ===== UI =====
-    let overlay, progressEl, panel, archiveBtn, fastBtn, noCodeBtn;
+    let overlay, progressEl, panel, archiveBtn, fastBtn, noCodeBtn, settingsBtn;
     let pendingProgressText = null;
     let lastProgressFlush = 0;
 
@@ -856,6 +994,20 @@ main{max-width:980px;margin:0 auto;padding:24px}
 .cc-arch-card .p{margin-bottom:10px}
 .cc-arch-card .ver{position:absolute;top:8px;right:12px;font-size:11px;color:#6b7280;letter-spacing:.02em}
 .cc-arch-card button{background:#d93025;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:700}
+.cc-arch-modal{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2147483647;display:flex;align-items:center;justify-content:center;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.cc-arch-modal-card{background:#171a21;color:#e6e8eb;border:1px solid #2a2f3a;border-radius:12px;padding:20px 22px;width:min(540px,92vw);max-height:88vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.6)}
+.cc-arch-modal h2{margin:0 0 14px;font-size:16px;font-weight:700}
+.cc-arch-modal label{display:flex;align-items:center;gap:8px;margin:12px 0 2px;font-size:13px;cursor:pointer}
+.cc-arch-modal label.block{flex-direction:column;align-items:stretch;gap:4px;cursor:default}
+.cc-arch-modal input[type=text],.cc-arch-modal input[type=number],.cc-arch-modal textarea{background:#0b0d12;border:1px solid #2a2f3a;color:#e6e8eb;border-radius:6px;padding:6px 8px;font:inherit;width:100%;box-sizing:border-box}
+.cc-arch-modal input[type=number]{width:100px}
+.cc-arch-modal textarea{min-height:96px;font:12px/1.4 "SFMono-Regular",Consolas,Menlo,monospace;resize:vertical}
+.cc-arch-modal .row{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
+.cc-arch-modal .hint{color:#9aa4b2;font-size:11px;margin:2px 0 6px;line-height:1.4}
+.cc-arch-modal .actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.cc-arch-modal .actions button{background:#16a34a;border:none;color:#fff;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600}
+.cc-arch-modal .actions button.secondary{background:#374151}
+.cc-arch-modal .actions button:hover{filter:brightness(1.1)}
 `;
         document.head.appendChild(s);
     }
@@ -900,6 +1052,87 @@ main{max-width:980px;margin:0 auto;padding:24px}
         archiveBtn.innerHTML = isBusy
             ? `<span class="cc-arch-spinner"></span> <span>${esc(T.archiving)}</span>`
             : `⬇ <span>${esc(T.archive)}</span>`;
+    }
+
+    // ===== SETTINGS MODAL =====
+    function showSettingsModal() {
+        if (document.querySelector('.cc-arch-modal')) return;
+        const modal = document.createElement('div');
+        modal.className = 'cc-arch-modal';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.innerHTML = `<div class="cc-arch-modal-card">
+  <h2>${esc(T.settingsTitle)}</h2>
+  <label><input type="checkbox" data-k="onlyNew"> <span>${esc(T.settingsOnlyNew)}</span></label>
+  <div class="hint">${esc(T.settingsOnlyNewHint)}</div>
+  <div class="row">
+    <label class="block"><span>${esc(T.settingsRangeFrom)}</span><input type="number" min="1" data-k="rangeFrom"></label>
+    <label class="block"><span>${esc(T.settingsRangeTo)}</span><input type="number" min="1" data-k="rangeTo"></label>
+  </div>
+  <div class="hint">${esc(T.settingsRangeHint)}</div>
+  <label><input type="checkbox" data-k="localOnly"> <span>${esc(T.settingsLocalOnly)}</span></label>
+  <div class="hint">${esc(T.settingsLocalOnlyHint)}</div>
+  <label><input type="checkbox" data-k="redactSecrets"> <span>${esc(T.settingsRedact)}</span></label>
+  <label class="block"><textarea data-k="secretPatterns" spellcheck="false"></textarea></label>
+  <div class="hint">${esc(T.settingsRedactHint)}</div>
+  <div class="actions">
+    <button type="button" class="secondary" data-act="cancel">${esc(T.settingsClose)}</button>
+    <button type="button" data-act="save">${esc(T.settingsSave)}</button>
+  </div>
+</div>`;
+        document.body.appendChild(modal);
+        const q = (sel) => modal.querySelector(sel);
+        // Populate from current settings (use a fresh load so concurrent
+        // tabs don't show stale values).
+        const cur = loadSettings();
+        modal.querySelectorAll('[data-k]').forEach(el => {
+            const k = el.getAttribute('data-k');
+            if (el.type === 'checkbox') el.checked = !!cur[k];
+            else if (el.type === 'number') el.value = cur[k] == null ? '' : cur[k];
+            else el.value = cur[k] == null ? '' : cur[k];
+        });
+
+        function close() { modal.remove(); }
+        function commit() {
+            const next = { ...cur };
+            modal.querySelectorAll('[data-k]').forEach(el => {
+                const k = el.getAttribute('data-k');
+                if (el.type === 'checkbox') next[k] = el.checked;
+                else if (el.type === 'number') {
+                    const v = parseInt(el.value, 10);
+                    next[k] = Number.isFinite(v) && v > 0 ? v : null;
+                } else {
+                    next[k] = el.value;
+                }
+            });
+            // Validate redact patterns by trying to compile each line.
+            const bad = [];
+            for (const line of String(next.secretPatterns || '').split('\n')) {
+                const t = line.trim();
+                if (!t) continue;
+                try { new RegExp(t); } catch (_) { bad.push(t); }
+            }
+            if (bad.length) {
+                alert('Invalid regex:\n' + bad.slice(0, 5).join('\n'));
+                return;
+            }
+            settings = next;
+            saveSettings(settings);
+            recompileRedact();
+            close();
+        }
+        q('[data-act=cancel]').onclick = close;
+        q('[data-act=save]').onclick = commit;
+        modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+        // Esc closes the modal (don't conflict with cancel-archive, which
+        // only triggers when `busy` is true).
+        const escHandler = (e) => {
+            if (e.key === 'Escape') {
+                close();
+                window.removeEventListener('keydown', escHandler, true);
+            }
+        };
+        window.addEventListener('keydown', escHandler, true);
     }
 
     // ===== KEEP THE PANEL ON-SCREEN =====
@@ -1043,6 +1276,13 @@ main{max-width:980px;margin:0 auto;padding:24px}
         noCodeBtn.innerHTML = `📝 <span>${esc(T.noCode)}</span>`;
         noCodeBtn.onclick = () => { skipCode = !skipCode; syncToggles(); };
         panel.appendChild(noCodeBtn);
+
+        settingsBtn = document.createElement('button');
+        settingsBtn.type = 'button';
+        settingsBtn.title = T.settingsTitleAttr;
+        settingsBtn.innerHTML = `⚙`;
+        settingsBtn.onclick = showSettingsModal;
+        panel.appendChild(settingsBtn);
 
         document.body.appendChild(panel);
         makeDraggable(panel, drag);
