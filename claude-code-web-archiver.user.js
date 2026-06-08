@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.1.5
+// @version      1.1.6
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Bilingual UI (EN/RU) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU по локали браузера.
 // @author       Contento-R
@@ -31,7 +31,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.1.5';
+    const VERSION = '1.1.6';
 
     // ===== I18N =====
     const I18N = {
@@ -108,24 +108,26 @@
 
     // ===== CONFIG =====
     const CFG_NORMAL = {
-        scrollStepRatio: 0.6,
-        scrollWaitMs: 650,
-        expandWaitMs: 120,
+        scrollStepRatio: 0.7,
+        scrollWaitMs: 500,
+        expandWaitMs: 90,
         stableLimit: 4,
         maxSteps: 4000,
         minTextLen: 8,
         imgTimeoutMs: 20000,
-        concurrency: 4,
+        concurrency: 6,
+        progressThrottleMs: 80,
     };
     const CFG_FAST = {
         scrollStepRatio: 0.9,
-        scrollWaitMs: 160,
-        expandWaitMs: 25,
+        scrollWaitMs: 140,
+        expandWaitMs: 20,
         stableLimit: 3,
         maxSteps: 4000,
         minTextLen: 8,
         imgTimeoutMs: 20000,
-        concurrency: 8,
+        concurrency: 10,
+        progressThrottleMs: 100,
     };
 
     // ===== STATE =====
@@ -134,21 +136,22 @@
     let fastMode = false;
     let skipCode = false;
     // key -> { html, role, y, seq }
-    //   y   = absolute Y position inside the chat container at first capture
-    //   seq = insertion counter, used as a stable tiebreaker
     const messages = new Map();
     let seqCounter = 0;
-    let order = [];               // final chronological order, computed after scroll
+    let order = [];
     let chatContainer = null;
+    let messagesParent = null;        // cached parent that holds message nodes
+    let seenNodes = new WeakSet();    // DOM nodes we've already extracted text from
     const cfg = () => (fastMode ? CFG_FAST : CFG_NORMAL);
 
     // ===== SMALL UTILS =====
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const keyOf = (t) => t.replace(/\s+/g, ' ').trim().slice(0, 220);
     const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const inViewport = (rect) => rect.bottom > 0 && rect.top < (window.innerHeight || document.documentElement.clientHeight);
 
     function getTitle() {
-        const h1 = document.querySelector('h1');
+        const h1 = document.querySelector('main h1') || document.querySelector('h1');
         if (h1 && h1.textContent.trim()) return h1.textContent.trim();
         return document.title.replace(/\s*\|\s*Claude.*$/i, '').trim() || 'claude-code-session';
     }
@@ -156,6 +159,8 @@
     function findChatContainer() {
         const main = document.querySelector('main') || document.body;
         let best = main, bestArea = 0;
+        // querySelectorAll('*') is unavoidable here, but it only runs once per
+        // archive run, so the one-time cost is acceptable.
         for (const el of main.querySelectorAll('*')) {
             const cs = getComputedStyle(el);
             if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
@@ -167,23 +172,43 @@
         return best;
     }
 
-    function findMessageNodes(container) {
+    // Locate the wrapper that holds individual message nodes, then cache it.
+    // The wrapper is stable for the lifetime of the chat — drilling 12 levels
+    // deep on every scroll step (as v1.1.5 did) is pure waste.
+    function ensureMessagesParent(container) {
+        if (messagesParent && messagesParent.isConnected) return messagesParent;
+        const min = cfg().minTextLen;
         let cur = container;
         for (let d = 0; d < 12; d++) {
             const kids = Array.from(cur.children || []);
-            const withText = kids.filter(c => ((c.innerText || c.textContent || '').trim().length > cfg().minTextLen));
-            if (withText.length >= 2) return withText;
+            const withText = kids.filter(c => ((c.textContent || '').trim().length > min));
+            if (withText.length >= 2) { messagesParent = cur; return cur; }
             if (withText.length === 1) { cur = withText[0]; continue; }
             break;
         }
-        return Array.from(container.querySelectorAll(':scope > * > *'))
-            .filter(c => ((c.innerText || '').trim().length > cfg().minTextLen));
+        messagesParent = container;
+        return container;
+    }
+
+    function getMessageNodes() {
+        const parent = ensureMessagesParent(chatContainer);
+        const min = cfg().minTextLen;
+        const out = [];
+        for (const c of parent.children) {
+            // textContent doesn't force layout; innerText does. We only need
+            // length here, so textContent is both faster and correct.
+            const t = c.textContent;
+            if (!t || t.length <= min) continue;
+            if (t.trim().length <= min) continue;
+            out.push(c);
+        }
+        if (out.length >= 2) return out;
+        // Fallback for unusual layouts.
+        return Array.from(parent.querySelectorAll(':scope > * > *'))
+            .filter(c => ((c.textContent || '').trim().length > min));
     }
 
     // ===== ROLE DETECTION =====
-    // Multi-strategy detector. Goes from the strongest signals (explicit role
-    // attributes the UI emits for accessibility / a11y / testing) down to
-    // weaker visual heuristics. Returns 'user' or 'assistant'.
     const ROLE_ATTRS = [
         'data-message-author-role',
         'data-author-role',
@@ -193,11 +218,17 @@
         'data-sender',
         'data-from',
     ];
+    // Word-bounded keyword sets. "you" was deliberately removed — it appears
+    // in almost every assistant message ("you can...", "if you...") and caused
+    // huge false-positive rates. Same for "ai", "bot", "response" which are
+    // too common in CSS/test ids to be reliable signals.
+    const USER_RE = /(^|[\s"'_./:-])(user|human|user[_-]?message|user[_-]?prompt)([\s"'_./:-]|$)/i;
+    const ASSISTANT_RE = /(^|[\s"'_./:-])(assistant|claude|agent|assistant[_-]?message)([\s"'_./:-]|$)/i;
     function classifyRoleString(s) {
         if (!s) return null;
-        const v = String(s).toLowerCase();
-        if (/\b(user|human|you|prompt)\b/.test(v)) return 'user';
-        if (/\b(assistant|claude|agent|ai|model|bot|response)\b/.test(v)) return 'assistant';
+        const v = String(s);
+        if (USER_RE.test(v)) return 'user';
+        if (ASSISTANT_RE.test(v)) return 'assistant';
         return null;
     }
     function roleFromAttrs(el) {
@@ -206,44 +237,50 @@
             const r = classifyRoleString(el.getAttribute(a));
             if (r) return r;
         }
-        const r = classifyRoleString(el.getAttribute('data-testid'));
-        if (r) return r;
+        const tid = classifyRoleString(el.getAttribute('data-testid'));
+        if (tid) return tid;
         const aria = classifyRoleString(el.getAttribute('aria-label'));
         if (aria) return aria;
         return null;
+    }
+    function classOf(el) {
+        if (!el || !el.getAttribute) return '';
+        // For SVG elements `className` is SVGAnimatedString, not a string;
+        // getAttribute is always a string or null.
+        return el.getAttribute('class') || '';
     }
     function guessRole(node) {
         // 1) Explicit role attributes on the node itself.
         let r = roleFromAttrs(node);
         if (r) return r;
 
-        // 2) Walk ancestors up to the chat container — Claude Code Web often
-        //    puts the role attribute on a wrapper several levels above.
+        // 2) Walk ancestors up to chatContainer; UI often puts role on a
+        //    wrapper several levels above. Cap depth to 10.
         for (let p = node.parentElement, i = 0; p && i < 10; p = p.parentElement, i++) {
             if (p === chatContainer) break;
             r = roleFromAttrs(p);
             if (r) return r;
+            const cs = classifyRoleString(classOf(p));
+            if (cs) return cs;
         }
 
-        // 3) Look inside the node — sometimes the role lives on an inner
-        //    wrapper or on a hidden a11y label.
+        // 3) A bounded sweep inside the node — first match wins.
         if (node.querySelectorAll) {
             const sel = ROLE_ATTRS.map(a => `[${a}]`).join(',') + ',[data-testid],[aria-label]';
-            for (const el of node.querySelectorAll(sel)) {
-                r = roleFromAttrs(el);
+            const list = node.querySelectorAll(sel);
+            for (let i = 0; i < list.length && i < 20; i++) {
+                r = roleFromAttrs(list[i]);
                 if (r) return r;
             }
         }
 
-        // 4) Class-name patterns. Use word boundaries so "user" only matches
-        //    as its own token (not inside "ui-userland" etc.).
-        const cls = (node.className || '') + ' ' + node.outerHTML.slice(0, 2000);
-        const userClass = /(^|[\s"'_-])(user|human)([\s"'_-]|$)/i.test(cls);
-        const asstClass = /(^|[\s"'_-])(assistant|claude|agent|model)([\s"'_-]|$)/i.test(cls);
-        if (userClass && !asstClass) return 'user';
-        if (asstClass && !userClass) return 'assistant';
+        // 4) Class names on the node itself. Crucially we DO NOT scan the
+        //    raw outerHTML text (v1.1.5 bug) — that matched user/Claude words
+        //    in actual message prose and mislabelled messages.
+        r = classifyRoleString(classOf(node));
+        if (r) return r;
 
-        // 5) Visual alignment via computed style on the live node.
+        // 5) Visual alignment on the live node and its first child.
         try {
             const cs = getComputedStyle(node);
             if (cs.alignSelf === 'flex-end' || cs.alignSelf === 'end') return 'user';
@@ -260,8 +297,7 @@
             }
         } catch (e) { /* ignore */ }
 
-        // 6) Geometric fallback — a bubble offset noticeably to the right of
-        //    its parent's centre is almost certainly a user message.
+        // 6) Geometric fallback.
         try {
             const rect = node.getBoundingClientRect();
             const parent = node.parentElement;
@@ -273,8 +309,8 @@
             }
         } catch (e) { /* ignore */ }
 
-        // 7) Old Tailwind hints (kept as last resort).
-        if (/ml-auto|justify-end|items-end|text-right|self-end/i.test(cls)) return 'user';
+        // 7) Legacy Tailwind hints (last resort, checked against class only).
+        if (/ml-auto|justify-end|items-end|text-right|self-end/i.test(classOf(node))) return 'user';
 
         return 'assistant';
     }
@@ -287,11 +323,6 @@
     }
 
     // ===== STRIP CODE / TOOL-CALL BLOCKS FROM A CLONE =====
-    // Claude Code Web puts code in many shapes: <pre> for markdown fences,
-    // <details> wrappers for tool calls (Bash/Edit/Write/etc.), and various
-    // custom containers. Class names change often, so the primary detector is
-    // computed `font-family` on the LIVE DOM — code is rendered with a
-    // monospace font regardless of how the container is named.
     const CODE_SELECTORS = [
         'pre',
         'details',
@@ -312,24 +343,16 @@
         '[aria-label*="code" i]',
     ].join(',');
     const MONO_RE = /mono|courier|consolas|menlo|monaco|fira\s*code|jetbrains/i;
-    // Anything above this many monospace characters is treated as a code block
-    // and stripped; below it we assume it's an inline technical term and keep it.
     const MONO_MIN_LEN = 25;
 
     function stripCode(clone, liveNode) {
         if (!liveNode || !liveNode.querySelectorAll) return 0;
-        const liveAll = [liveNode, ...liveNode.querySelectorAll('*')];
-        const cloneAll = [clone, ...clone.querySelectorAll('*')];
-        const aligned = liveAll.length === cloneAll.length;
         const toRemove = new Set();
-
-        // Pass 1 — selector match on the clone (cheap, always works).
         clone.querySelectorAll(CODE_SELECTORS).forEach(e => toRemove.add(e));
 
-        // Pass 2 — computed-style scan on the live DOM, mapped to clone by index.
-        // This is the catch-all: any container rendered with a monospace font and
-        // substantial text is treated as code.
-        if (aligned) {
+        const liveAll = [liveNode, ...liveNode.querySelectorAll('*')];
+        const cloneAll = [clone, ...clone.querySelectorAll('*')];
+        if (liveAll.length === cloneAll.length) {
             for (let i = 0; i < liveAll.length; i++) {
                 const le = liveAll[i];
                 const ce = cloneAll[i];
@@ -337,14 +360,12 @@
                 let cs;
                 try { cs = getComputedStyle(le); } catch (_) { continue; }
                 if (!cs) continue;
-
                 const ff = cs.fontFamily || '';
                 if (MONO_RE.test(ff)) {
                     const txt = (le.textContent || '').trim();
                     if (txt.length >= MONO_MIN_LEN) toRemove.add(ce);
                     continue;
                 }
-                // Block-level <code> outside <pre> — usually an editor / file viewer.
                 if (le.tagName === 'CODE') {
                     const d = cs.display;
                     if (d === 'block' || d === 'flex' || d === 'grid') toRemove.add(ce);
@@ -352,8 +373,6 @@
             }
         }
 
-        // Remove only the outermost marked element of each subtree so we don't
-        // waste work removing children that are already going away with their parent.
         let removed = 0;
         for (const e of toRemove) {
             let p = e.parentElement, nested = false;
@@ -368,9 +387,6 @@
     // ===== SANITIZE A LIVE NODE INTO PORTABLE HTML =====
     function sanitizeClone(node) {
         const clone = node.cloneNode(true);
-        // Run skipCode FIRST, while the clone is still a 1:1 mirror of the live
-        // node — stripCode uses parallel indexing into live/clone to read
-        // computed styles.
         if (skipCode) stripCode(clone, node);
         const liveImgs = node.querySelectorAll('img');
         const cloneImgs = clone.querySelectorAll('img');
@@ -386,66 +402,71 @@
             span.innerHTML = b.innerHTML;
             b.replaceWith(span);
         });
+        const keep = new Set(['src', 'href', 'alt', 'colspan', 'rowspan']);
         clone.querySelectorAll('*').forEach(el => {
-            [...el.attributes].forEach(at => {
-                if (!['src', 'href', 'alt', 'colspan', 'rowspan'].includes(at.name)) el.removeAttribute(at.name);
-            });
+            const attrs = el.attributes;
+            for (let i = attrs.length - 1; i >= 0; i--) {
+                const n = attrs[i].name;
+                if (!keep.has(n)) el.removeAttribute(n);
+            }
         });
         return clone;
     }
 
-    // ===== EXPAND SAFE DISCLOSURE ELEMENTS IN VIEW =====
+    // ===== EXPAND DISCLOSURE ELEMENTS IN VIEW =====
+    // Only act on widgets that are actually within (or near) the viewport, so
+    // we don't sledgehammer the whole chat tree on every scroll step.
     async function expandInView(container) {
-        const toOpen = [];
-        // When skipCode is on, <details> blocks are tool-call code and will be
-        // dropped anyway — don't pay the time to open them.
+        const detailsToOpen = [];
         if (!skipCode) {
-            container.querySelectorAll('details:not([open])').forEach(d => toOpen.push(['details', d]));
-        }
-        container.querySelectorAll('[aria-expanded="false"]').forEach(el => toOpen.push(['aria', el]));
-        if (toOpen.length === 0) return;
-        // Open <details> synchronously in a batch (no per-item wait needed).
-        for (const [kind, el] of toOpen) {
-            if (cancelled) return;
-            if (kind === 'details') {
-                try { el.open = true; } catch (e) { /* ignore */ }
+            for (const d of container.querySelectorAll('details:not([open])')) {
+                if (inViewport(d.getBoundingClientRect())) detailsToOpen.push(d);
             }
         }
-        // aria-expanded buttons need clicks; pace them with the configured delay.
-        for (const [kind, el] of toOpen) {
+        // Synchronous batch open — no per-item wait needed.
+        for (const d of detailsToOpen) {
             if (cancelled) return;
-            if (kind !== 'aria') continue;
-            try { el.click(); } catch (e) { /* ignore */ }
-            if (cfg().expandWaitMs > 0) await sleep(cfg().expandWaitMs);
+            try { d.open = true; } catch (_) {}
+        }
+
+        const ariaToClick = [];
+        for (const el of container.querySelectorAll('[aria-expanded="false"]')) {
+            if (inViewport(el.getBoundingClientRect())) ariaToClick.push(el);
+        }
+        const wait = cfg().expandWaitMs;
+        for (const el of ariaToClick) {
+            if (cancelled) return;
+            try { el.click(); } catch (_) {}
+            if (wait > 0) await sleep(wait);
         }
     }
 
     // ===== CAPTURE WHAT'S CURRENTLY IN THE DOM =====
-    // For each newly-seen message, record its absolute Y position inside the
-    // scrollable chat container. Visual top-to-bottom order = chronological
-    // order in the chat, so we sort the whole map by Y once scrolling is done.
-    // This avoids relying on DOM child order, which is meaningless in
-    // virtualized lists.
     function captureVisible(container) {
         const containerRect = container.getBoundingClientRect();
         const scrollY = container.scrollTop || 0;
-        const nodes = findMessageNodes(container);
+        const nodes = getMessageNodes();
+        const min = cfg().minTextLen;
         for (const node of nodes) {
-            const text = (node.innerText || node.textContent || '').trim();
-            if (text.length < cfg().minTextLen) continue;
+            // Skip nodes we've already extracted to avoid recomputing text
+            // and Y for unchanged messages.
+            if (seenNodes.has(node)) continue;
+            const text = (node.textContent || '').trim();
+            if (text.length < min) continue;
             const k = keyOf(text);
-            if (messages.has(k)) continue;
+            if (messages.has(k)) { seenNodes.add(node); continue; }
             let y = 0;
             try {
                 const rect = node.getBoundingClientRect();
                 y = rect.top - containerRect.top + scrollY;
-            } catch (e) { y = scrollY; }
+            } catch (_) { y = scrollY; }
             messages.set(k, {
                 html: sanitizeClone(node).outerHTML,
                 role: guessRole(node),
                 y,
                 seq: seqCounter++,
             });
+            seenNodes.add(node);
         }
     }
 
@@ -479,8 +500,10 @@
             steps++;
             await sleep(cfg().scrollWaitMs);
         }
+        // Final sweep, force-flush progress.
         await expandInView(container);
         captureVisible(container);
+        setProgress(T.scrolling(messages.size), true);
     }
 
     // ===== IMAGE DOWNLOAD =====
@@ -510,10 +533,10 @@
         try {
             const r = await fetch(url, { credentials: 'include' });
             if (r.ok) return await blobToDataURL(await r.blob());
-        } catch (e) { /* fall through */ }
+        } catch (_) { /* fall through */ }
         try {
             return await blobToDataURL(await gmGet(url));
-        } catch (e) { /* fall through */ }
+        } catch (_) { /* fall through */ }
         return null;
     }
 
@@ -538,7 +561,7 @@
         const map = new Map();
         let done = 0, ok = 0, idx = 0;
         const conc = Math.max(1, Math.min(cfg().concurrency, total || 1));
-        setProgress(T.downloading(0, total, 0));
+        setProgress(T.downloading(0, total, 0), true);
 
         async function worker() {
             while (!cancelled) {
@@ -552,7 +575,7 @@
             }
         }
         await Promise.all(Array.from({ length: conc }, worker));
-        setProgress(T.embedded(ok, total));
+        setProgress(T.embedded(ok, total), true);
         return map;
     }
 
@@ -619,10 +642,11 @@ main{max-width:980px;margin:0 auto;padding:24px}
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        const safe = getTitle().replace(/[^\wÀ-￿\s\-]/g, '_').replace(/\s+/g, '_').slice(0, 80);
+        const safe = getTitle().replace(/[^\wÀ-ÿĀ-�\s\-]/g, '_').replace(/\s+/g, '_').slice(0, 80);
         a.download = (safe || 'claude-code-session') + '.' + ext;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        document.body.appendChild(a); a.click(); a.remove();
+        // Defer revocation so slow browsers actually start the download first.
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
 
     // ===== RUN =====
@@ -631,28 +655,27 @@ main{max-width:980px;margin:0 auto;padding:24px}
         if (!confirm(T.confirm)) return;
         busy = true; cancelled = false;
         messages.clear(); seqCounter = 0; order = [];
+        messagesParent = null;
+        seenNodes = new WeakSet();
         showOverlay();
         try {
             chatContainer = findChatContainer();
             if (!chatContainer) { alert(T.noContainer); return; }
 
-            setProgress(T.starting);
+            setProgress(T.starting, true);
             await autoScroll(chatContainer);
-            if (cancelled) { setProgress(T.cancelled); return; }
+            if (cancelled) { setProgress(T.cancelled, true); return; }
 
-            // Sort all captured messages by their visual Y position — that's
-            // the only signal that reliably matches conversation order in a
-            // virtualized chat.
             order = buildOrder();
 
-            setProgress(T.scrollDone(order.length));
+            setProgress(T.scrollDone(order.length), true);
             const imgMap = await downloadAllImages();
-            if (cancelled) { setProgress(T.cancelled); return; }
+            if (cancelled) { setProgress(T.cancelled, true); return; }
 
-            setProgress(T.building);
+            setProgress(T.building, true);
             const html = buildHtml(imgMap);
             download(html, 'html', 'text/html;charset=utf-8');
-            setProgress(T.done(order.length, imgMap.size));
+            setProgress(T.done(order.length, imgMap.size), true);
             await sleep(1500);
         } catch (e) {
             console.error('[archiver]', e);
@@ -665,13 +688,16 @@ main{max-width:980px;margin:0 auto;padding:24px}
 
     // ===== UI =====
     let overlay, progressEl, panel, fastBtn, noCodeBtn;
+    let pendingProgressText = null;
+    let lastProgressFlush = 0;
+
     function addStyles() {
         if (document.getElementById('cc-arch-styles')) return;
         const s = document.createElement('style');
         s.id = 'cc-arch-styles';
         s.textContent = `
-.cc-arch-panel{position:fixed;bottom:20px;right:20px;background:#16a34a;color:#fff;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.4);z-index:2147483647;display:flex;align-items:stretch;padding:2px;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;user-select:none}
-.cc-arch-drag{width:12px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.75);cursor:grab;font-size:10px;line-height:1;letter-spacing:-1px}
+.cc-arch-panel{position:fixed;bottom:20px;right:20px;background:#16a34a;color:#fff;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.4);z-index:2147483647;display:flex;align-items:stretch;padding:2px;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;user-select:none;touch-action:none}
+.cc-arch-drag{width:12px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.75);cursor:grab;font-size:10px;line-height:1;letter-spacing:-1px;touch-action:none}
 .cc-arch-drag:active{cursor:grabbing}
 .cc-arch-panel button{background:rgba(255,255,255,.14);color:#fff;border:none;border-radius:5px;height:24px;padding:0 8px;margin:1px;cursor:pointer;font:inherit;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
 .cc-arch-panel button:hover{background:rgba(255,255,255,.26)}
@@ -691,10 +717,25 @@ main{max-width:980px;margin:0 auto;padding:24px}
         overlay.innerHTML = `<div class="cc-arch-card"><div class="ver">v${esc(VERSION)}</div><div class="p" id="cc-arch-progress">${esc(T.startingShort)}</div><button id="cc-arch-cancel">${esc(T.cancel)}</button></div>`;
         document.body.appendChild(overlay);
         progressEl = overlay.querySelector('#cc-arch-progress');
-        overlay.querySelector('#cc-arch-cancel').onclick = () => { cancelled = true; setProgress(T.cancelling); };
+        overlay.querySelector('#cc-arch-cancel').onclick = () => { cancelled = true; setProgress(T.cancelling, true); };
+        pendingProgressText = null;
+        lastProgressFlush = 0;
     }
-    function hideOverlay() { if (overlay) { overlay.remove(); overlay = null; } }
-    function setProgress(t) { if (progressEl) progressEl.textContent = t; }
+    function hideOverlay() { if (overlay) { overlay.remove(); overlay = null; progressEl = null; } }
+
+    // Throttled progress writer. Inner loop calls this dozens of times per
+    // second; only flush to the DOM once every `progressThrottleMs` (or
+    // immediately when `force` is true, for terminal messages).
+    function setProgress(text, force) {
+        if (!progressEl) return;
+        pendingProgressText = text;
+        const now = performance.now();
+        const interval = cfg().progressThrottleMs;
+        if (!force && now - lastProgressFlush < interval) return;
+        lastProgressFlush = now;
+        progressEl.textContent = pendingProgressText;
+        pendingProgressText = null;
+    }
 
     function syncToggles() {
         if (fastBtn) {
@@ -707,32 +748,52 @@ main{max-width:980px;margin:0 auto;padding:24px}
         }
     }
 
+    // ===== DRAGGING =====
+    // Listeners on document are installed ONCE for the whole script's lifetime.
+    // Previous versions re-installed them every time the panel was rebuilt,
+    // leaking pointermove/pointerup handlers indefinitely.
+    let dragState = null;
+    function installGlobalDragListeners() {
+        if (installGlobalDragListeners._done) return;
+        installGlobalDragListeners._done = true;
+        document.addEventListener('pointermove', (e) => {
+            if (!dragState) return;
+            const { p, startX, startY, startLeft, startTop } = dragState;
+            const nl = Math.max(0, Math.min(window.innerWidth - p.offsetWidth, startLeft + (e.clientX - startX)));
+            const nt = Math.max(0, Math.min(window.innerHeight - p.offsetHeight, startTop + (e.clientY - startY)));
+            p.style.left = nl + 'px';
+            p.style.top = nt + 'px';
+        }, { passive: true });
+        const endDrag = () => {
+            if (!dragState) return;
+            try {
+                localStorage.setItem('cc-arch-pos', JSON.stringify({
+                    left: dragState.p.style.left,
+                    top: dragState.p.style.top,
+                }));
+            } catch (_) { /* ignore */ }
+            dragState = null;
+        };
+        document.addEventListener('pointerup', endDrag, { passive: true });
+        document.addEventListener('pointercancel', endDrag, { passive: true });
+    }
+
     function makeDraggable(p, handle) {
-        let dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
-        handle.addEventListener('mousedown', (e) => {
+        handle.addEventListener('pointerdown', (e) => {
             const rect = p.getBoundingClientRect();
             p.style.left = rect.left + 'px';
             p.style.top = rect.top + 'px';
             p.style.right = 'auto';
             p.style.bottom = 'auto';
-            startLeft = rect.left;
-            startTop = rect.top;
-            startX = e.clientX;
-            startY = e.clientY;
-            dragging = true;
+            dragState = {
+                p,
+                startX: e.clientX,
+                startY: e.clientY,
+                startLeft: rect.left,
+                startTop: rect.top,
+            };
+            try { handle.setPointerCapture(e.pointerId); } catch (_) {}
             e.preventDefault();
-        });
-        document.addEventListener('mousemove', (e) => {
-            if (!dragging) return;
-            const nl = Math.max(0, Math.min(window.innerWidth - p.offsetWidth, startLeft + (e.clientX - startX)));
-            const nt = Math.max(0, Math.min(window.innerHeight - p.offsetHeight, startTop + (e.clientY - startY)));
-            p.style.left = nl + 'px';
-            p.style.top = nt + 'px';
-        });
-        document.addEventListener('mouseup', () => {
-            if (!dragging) return;
-            dragging = false;
-            try { localStorage.setItem('cc-arch-pos', JSON.stringify({ left: p.style.left, top: p.style.top })); } catch (e) {}
         });
         try {
             const saved = JSON.parse(localStorage.getItem('cc-arch-pos') || 'null');
@@ -742,7 +803,7 @@ main{max-width:980px;margin:0 auto;padding:24px}
                 p.style.right = 'auto';
                 p.style.bottom = 'auto';
             }
-        } catch (e) { /* ignore */ }
+        } catch (_) { /* ignore */ }
     }
 
     function makePanel() {
@@ -780,7 +841,26 @@ main{max-width:980px;margin:0 auto;padding:24px}
         syncToggles();
     }
 
-    function init() { addStyles(); makePanel(); }
+    // Keep the panel alive across SPA-style re-renders. MutationObserver on
+    // <body> is event-driven; the v1.1.5 setInterval polled every 2s for no
+    // good reason.
+    let panelObserver = null;
+    function installPanelKeepalive() {
+        if (panelObserver) return;
+        panelObserver = new MutationObserver(() => {
+            if (document.body && !document.querySelector('.cc-arch-panel')) makePanel();
+        });
+        panelObserver.observe(document.documentElement, { childList: true, subtree: false });
+        if (document.body) {
+            panelObserver.observe(document.body, { childList: true, subtree: false });
+        }
+    }
+
+    function init() {
+        addStyles();
+        installGlobalDragListeners();
+        makePanel();
+        installPanelKeepalive();
+    }
     if (document.body) init(); else document.addEventListener('DOMContentLoaded', init);
-    setInterval(() => { if (document.body && !document.querySelector('.cc-arch-panel')) makePanel(); }, 2000);
 })();

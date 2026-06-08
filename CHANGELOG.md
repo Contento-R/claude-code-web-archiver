@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-05-21
+
+### Fixed (correctness)
+- **Role detection no longer matches words inside message prose.** v1.1.5 ran
+  its class-name regex against `outerHTML.slice(0, 2000)` — that string
+  contains the rendered text, so an assistant message saying "the user said"
+  was relabelled as User. Now we only inspect class/role attributes on the
+  node and its ancestors.
+- Removed `you`, `ai`, `bot`, `response` from the User/Assistant keyword sets.
+  They appeared in normal prose ("if you do X...") and triggered massive
+  false positives.
+- **Drag event-listener leak.** v1.1.5 added `mousemove`/`mouseup` listeners
+  to `document` every time the panel was created, and the v1.1.5 setInterval
+  could create the panel many times per session. Listeners now live in a
+  single global install pass; the per-handle code only attaches `pointerdown`.
+- **`URL.revokeObjectURL` race.** Revoking the blob URL immediately after
+  `a.click()` could abort the download on slow browsers. Revocation is now
+  deferred by 60 seconds.
+
+### Performance
+- **`textContent` instead of `innerText`** in hot paths. `innerText` forces a
+  synchronous layout reflow on every read; `textContent` doesn't. Scrolling
+  through a long session no longer thrashes layout.
+- **Cached messages-parent.** v1.1.5 drilled 12 levels into the chat tree on
+  every scroll step. That wrapper is stable, so we resolve it once and
+  enumerate `parent.children` directly thereafter.
+- **`WeakSet` of seen DOM nodes** skips re-extraction of text/Y/role for
+  message nodes we've already captured — a big win on long sessions where
+  the same nodes stay visible across many scroll steps.
+- **Throttled progress overlay.** `setProgress` was hitting the DOM on every
+  iteration; now it flushes at most once per `progressThrottleMs` (80 ms in
+  normal, 100 ms in fast), with a `force` flag for terminal messages.
+- **`expandInView` is viewport-scoped.** Previously it called
+  `querySelectorAll` for the whole chat tree on every step. Now it opens /
+  clicks only disclosure widgets currently in the viewport.
+- **MutationObserver replaces the panel-keepalive `setInterval`** — no more
+  polling every 2 seconds for the lifetime of the page.
+- Slightly relaxed defaults in `CFG_NORMAL`: `scrollWaitMs` 650 → 500,
+  `expandWaitMs` 120 → 90, `concurrency` 4 → 6. Fast mode tuned to
+  `scrollWaitMs` 140 and `concurrency` 10.
+
+### UX
+- Drag now uses **pointer events**, so the panel is draggable on touch
+  devices and styluses, not just mice. Added `touch-action: none` so the
+  page doesn't try to scroll while you're dragging the handle.
+
 ## [1.1.5] - 2026-05-21
 
 ### Fixed
