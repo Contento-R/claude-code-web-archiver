@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.5.0
+// @version      1.6.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -33,7 +33,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.5.0';
+    const VERSION = '1.6.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -99,6 +99,7 @@
         toggleCollapse: 'Toggle assistant blocks',
         showResponse: 'Show response',
         hideResponse: 'Hide response',
+        resumePrompt: (n, minutes) => `An interrupted archive was found for this session (${n} messages, ${minutes} min ago).\n\nResume from where it stopped?`,
     };
     const I18N = {
         en: I18N_EN,
@@ -163,6 +164,7 @@
             toggleCollapse: 'Свернуть/развернуть ответы',
             showResponse: 'Показать ответ',
             hideResponse: 'Скрыть ответ',
+            resumePrompt: (n, minutes) => `Найден прерванный архив для этой сессии (${n} сообщений, ${minutes} мин назад).\n\nПродолжить с того места?`,
         },
         de: {
             htmlLang: 'de',
@@ -398,6 +400,53 @@
     }
     let knownKeys = new Set();
     let onlyNewActiveForRun = false;
+
+    // ===== RESUME STATE (per-URL, expires after 24h) =====
+    // Periodically snapshot the captured-but-not-yet-built archive so a
+    // crashed/closed tab can pick up where it left off. We store only the
+    // message map; settings live in their own key and image data is fetched
+    // fresh on resume.
+    const RESUME_KEY = 'cc-arch-resume';
+    const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
+    const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
+    let lastResumeSaveTs = 0;
+    function saveResumeSnapshot() {
+        if (!chatContainer) return;
+        const now = Date.now();
+        // Throttle to once per ~5s during scroll.
+        if (now - lastResumeSaveTs < 5000) return;
+        try {
+            const payload = {
+                url: location.href,
+                ts: now,
+                version: VERSION,
+                seqCounter,
+                fastMode,
+                skipCode,
+                messages: [...messages.entries()],
+            };
+            const json = JSON.stringify(payload);
+            if (json.length > RESUME_MAX_BYTES) return; // skip silently — too big to persist
+            localStorage.setItem(RESUME_KEY, json);
+            lastResumeSaveTs = now;
+        } catch (_) { /* quota etc. — best-effort */ }
+    }
+    function loadResumeSnapshot() {
+        try {
+            const raw = localStorage.getItem(RESUME_KEY);
+            if (!raw) return null;
+            const s = JSON.parse(raw);
+            if (!s || typeof s !== 'object') return null;
+            if (s.url !== location.href) return null;
+            if (Date.now() - (s.ts || 0) > RESUME_TTL_MS) return null;
+            if (!Array.isArray(s.messages)) return null;
+            return s;
+        } catch (_) { return null; }
+    }
+    function clearResumeSnapshot() {
+        try { localStorage.removeItem(RESUME_KEY); } catch (_) {}
+        lastResumeSaveTs = 0;
+    }
 
     // ===== PER-MESSAGE METADATA DETECTION =====
     // The list mirrors the public Claude Code tool set. The leading-text
@@ -904,6 +953,7 @@
         while (!cancelled && steps < cfg().maxSteps) {
             await expandInView(container);
             captureVisible(container);
+            saveResumeSnapshot();
             setProgress(T.scrolling(messages.size));
             const top = container.scrollTop;
             const atBottom = top + container.clientHeight >= container.scrollHeight - 4;
@@ -1308,20 +1358,32 @@ if(collapseBtn){
   <button id="cc-collapse-toggle" type="button" title="${esc(T.toggleCollapse)}">▾▴</button>
   <button id="cc-theme-toggle" type="button" title="${esc(T.toggleTheme)}">🌓</button>
 </div>`;
-        return `<!DOCTYPE html>
+        // Stream the file as an array of chunks. Blob will assemble them
+        // without forcing us to concatenate a single huge string.
+        const head = `<!DOCTYPE html>
 <html lang="${T.htmlLang}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <style>${css}</style></head>
 <body>
 <header><h1>${esc(title)}</h1><div class="meta">${meta}</div>${controls}</header>
-<main>${parts.join('\n')}</main>
+<main>`;
+        const tail = `</main>
 <script>${inlineScript}</script>
 </body></html>`;
+        const out = [head];
+        for (const p of parts) { out.push(p); out.push('\n'); }
+        out.push(tail);
+        return out;
     }
 
     function download(content, ext, mime) {
-        const blob = new Blob([content], { type: mime });
+        // `content` can be either a string or an array of strings/Blobs.
+        // Passing an array directly to Blob lets the browser stream the
+        // pieces internally instead of forcing us to concatenate ~10s of
+        // MB of HTML in JS memory.
+        const parts = Array.isArray(content) ? content : [content];
+        const blob = new Blob(parts, { type: mime });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1334,7 +1396,22 @@ if(collapseBtn){
     // ===== RUN =====
     async function run() {
         if (busy) return;
-        if (!confirm(T.confirm)) return;
+        // Resume offer — if there's a recent unfinished archive for this
+        // URL, ask first. If the user declines, drop the snapshot and ask
+        // the normal start-confirmation.
+        const snapshot = loadResumeSnapshot();
+        let resuming = false;
+        if (snapshot) {
+            const minutes = Math.max(1, Math.round((Date.now() - snapshot.ts) / 60000));
+            if (confirm(T.resumePrompt(snapshot.messages.length, minutes))) {
+                resuming = true;
+            } else {
+                clearResumeSnapshot();
+                if (!confirm(T.confirm)) return;
+            }
+        } else {
+            if (!confirm(T.confirm)) return;
+        }
         busy = true; cancelled = false;
         messages.clear(); seqCounter = 0; order = [];
         messagesParent = null;
@@ -1345,18 +1422,30 @@ if(collapseBtn){
         recompileRedact();
         knownKeys = loadKnownKeys();
         onlyNewActiveForRun = !!settings.onlyNew;
+        if (resuming) {
+            // Restore the captured-message map; image map is recomputed.
+            for (const [k, v] of snapshot.messages) messages.set(k, v);
+            seqCounter = snapshot.seqCounter || messages.size;
+            // Honour the original fast/skip toggles from the snapshot so
+            // the output is consistent with what the user originally chose.
+            if (typeof snapshot.fastMode === 'boolean') fastMode = snapshot.fastMode;
+            if (typeof snapshot.skipCode === 'boolean') skipCode = snapshot.skipCode;
+            syncToggles();
+        }
         setArchiveBtnBusy(true);
         showOverlay();
         let imgMap = new Map();
         try {
             chatContainer = findChatContainer();
             if (!chatContainer) { alert(T.noContainer); return; }
-            // Best-effort: read the model name from the page chrome once.
-            // Used to stamp a badge on assistant messages in the output.
             detectedModel = extractModelName();
-            setProgress(T.starting, true);
-            await autoScroll(chatContainer);
-            if (cancelled) { setProgress(T.cancelled, true); return; }
+            if (resuming) {
+                setProgress(T.scrolling(messages.size), true);
+            } else {
+                setProgress(T.starting, true);
+                await autoScroll(chatContainer);
+                if (cancelled) { setProgress(T.cancelled, true); return; }
+            }
             order = buildOrder();
             setProgress(T.scrollDone(order.length), true);
             imgMap = await downloadAllImages();
@@ -1388,6 +1477,9 @@ if(collapseBtn){
             // it on later still picks up where we left off.
             const merged = new Set([...knownKeys, ...order]);
             saveKnownKeys(merged);
+            // Archive completed successfully — wipe the resume snapshot so
+            // it doesn't haunt the next session.
+            clearResumeSnapshot();
             await sleep(1500);
         } catch (e) {
             console.error('[archiver]', e);

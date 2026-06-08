@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-05-21
+
+### Added
+- **Resume after crash (#17).** A snapshot of the captured message map is
+  saved to `localStorage` every ~5 seconds during the scroll phase
+  (per-URL, 24 h TTL, capped at ~4 MB so it stays well under the quota).
+  If the browser tab is closed, refreshed or the archive is aborted,
+  the next Archive click for the same URL offers to resume from the
+  snapshot — skipping the entire scroll step and jumping straight to
+  screenshot download + build. Snapshot is wiped on successful archive.
+- **Greasyfork publication kit (#25).** `GREASYFORK.md` ships a
+  ready-to-copy name / short description / full description / tags
+  block, plus a small update workflow.
+
+### Changed
+- **Streaming HTML build (#16).** `buildHtml` now returns an array of
+  chunks (head, per-message sections, tail) and `download` passes it
+  directly to `new Blob(parts, …)`. The browser assembles the file
+  internally instead of forcing us to concatenate a single ~10s-MB
+  string in JS memory. Large multi-screenshot sessions no longer spike
+  memory at export time.
+
 ## [1.5.0] - 2026-05-21
 
 ### Added
