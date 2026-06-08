@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.3.0
+// @version      1.4.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -33,7 +33,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.3.0';
+    const VERSION = '1.4.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -374,6 +374,96 @@
     }
     let knownKeys = new Set();
     let onlyNewActiveForRun = false;
+
+    // ===== PER-MESSAGE METADATA DETECTION =====
+    // The list mirrors the public Claude Code tool set. The leading-text
+    // regex is anchored so we don't match a tool name appearing later in
+    // an assistant's prose.
+    const TOOL_NAMES = [
+        'Bash', 'Edit', 'Write', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
+        'Task', 'TodoWrite', 'NotebookEdit', 'NotebookRead', 'MultiEdit',
+        'ExitPlanMode', 'SlashCommand', 'KillShell',
+    ];
+    const TOOL_RE = new RegExp('^\\s*(' + TOOL_NAMES.join('|') + ')\\s*[\\(:\\-\\u2013\\u2014]', 'i');
+    function detectTool(text, node) {
+        const head = (text || '').slice(0, 80);
+        const m = head.match(TOOL_RE);
+        if (m) {
+            const lower = m[1].toLowerCase();
+            for (const name of TOOL_NAMES) if (name.toLowerCase() === lower) return name;
+            return m[1];
+        }
+        if (node && node.querySelector) {
+            const el = node.querySelector('[data-testid*="tool" i]');
+            if (el) {
+                const t = (el.getAttribute('data-testid') || '').toLowerCase();
+                for (const name of TOOL_NAMES) if (t.includes(name.toLowerCase())) return name;
+            }
+        }
+        return null;
+    }
+
+    function detectTimestamp(node) {
+        if (!node || !node.querySelector) return null;
+        const t = node.querySelector('time[datetime]');
+        if (t) {
+            const dt = t.getAttribute('datetime');
+            if (dt) return dt;
+        }
+        // [title] or [aria-label] attributes that look like a timestamp.
+        const TS_HINT = /\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\b/;
+        const list = node.querySelectorAll('[title],[aria-label]');
+        for (let i = 0; i < list.length && i < 30; i++) {
+            const el = list[i];
+            const v = el.getAttribute('title') || el.getAttribute('aria-label') || '';
+            if (TS_HINT.test(v)) return v;
+        }
+        return null;
+    }
+
+    // Formats whatever string we captured into a clean "YYYY-MM-DD HH:MM"
+    // when possible; falls back to the raw value.
+    function formatTimestamp(s) {
+        if (!s) return '';
+        const d = new Date(s);
+        if (!isNaN(d.getTime())) {
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+        return s.slice(0, 40);
+    }
+
+    let detectedModel = null;
+    function extractModelName() {
+        const KNOWN = /\b(?:Claude\s+)?(Opus|Sonnet|Haiku)(?:\s+\d+(?:\.\d+)?)?\b/i;
+        const sels = [
+            '[data-testid*="model" i]',
+            '[aria-label*="model" i]',
+            '[title*="model" i]',
+            '[aria-label*="opus" i]', '[aria-label*="sonnet" i]', '[aria-label*="haiku" i]',
+            '[title*="opus" i]', '[title*="sonnet" i]', '[title*="haiku" i]',
+            'button[class*="model" i]',
+        ];
+        const seen = new Set();
+        for (const sel of sels) {
+            let list;
+            try { list = document.querySelectorAll(sel); } catch (_) { continue; }
+            for (const el of list) {
+                if (seen.has(el)) continue;
+                seen.add(el);
+                const t = ((el.getAttribute('aria-label') || '') + ' ' +
+                           (el.getAttribute('title') || '') + ' ' +
+                           (el.textContent || '')).trim();
+                const m = t.match(KNOWN);
+                if (m) {
+                    // Take the matched substring up to a comma or end.
+                    const i = t.indexOf(m[0]);
+                    return t.slice(i, i + 40).replace(/[,;:].*$/, '').trim();
+                }
+            }
+        }
+        return null;
+    }
 
     // ===== ARCHIVE HISTORY =====
     const HISTORY_KEY = 'cc-arch-history';
@@ -737,6 +827,8 @@
                 role: guessRole(node),
                 y,
                 seq: seqCounter++,
+                tool: detectTool(text, node),
+                time: detectTimestamp(node),
             });
             seenNodes.add(node);
         }
@@ -748,11 +840,43 @@
             .map(([k]) => k);
     }
 
+    // ===== MUTATION-OBSERVER-DRIVEN WAIT =====
+    // Resolves as soon as a DOM mutation is seen in the target subtree,
+    // OR after `timeoutMs`, whichever comes first. Lets autoScroll move
+    // to the next step the instant new content appears, instead of
+    // sleeping a fixed delay every time.
+    function waitForMutationOrTimeout(target, timeoutMs) {
+        return new Promise((resolve) => {
+            if (!target || target.nodeType !== 1) {
+                setTimeout(resolve, timeoutMs);
+                return;
+            }
+            let resolved = false;
+            const finish = () => {
+                if (resolved) return;
+                resolved = true;
+                try { obs.disconnect(); } catch (_) {}
+                clearTimeout(timer);
+                resolve();
+            };
+            const obs = new MutationObserver(finish);
+            try {
+                obs.observe(target, { childList: true, subtree: true });
+            } catch (_) {
+                setTimeout(resolve, timeoutMs);
+                return;
+            }
+            const timer = setTimeout(finish, timeoutMs);
+        });
+    }
+
     // ===== AUTO-SCROLL THROUGH THE WHOLE SESSION =====
     async function autoScroll(container) {
         container.scrollTop = 0;
-        await sleep(cfg().scrollWaitMs * 1.5);
-        let lastTop = -1, stable = 0, steps = 0;
+        await sleep(Math.min(cfg().scrollWaitMs * 1.5, 600));
+        // Resolve the messages parent up front so MO-wait can attach to it.
+        ensureMessagesParent(container);
+        let lastTop = -1, stable = 0, steps = 0, stuckTries = 0;
         while (!cancelled && steps < cfg().maxSteps) {
             await expandInView(container);
             captureVisible(container);
@@ -761,14 +885,34 @@
             const atBottom = top + container.clientHeight >= container.scrollHeight - 4;
             if (top === lastTop || atBottom) {
                 stable++;
+                // Stuck-scroll mitigation: scrollTop assignment was ignored.
+                // Try a wheel event and scrollIntoView on the last child.
+                if (!atBottom && top === lastTop && stuckTries < 2) {
+                    stuckTries++;
+                    try {
+                        container.dispatchEvent(new WheelEvent('wheel', {
+                            deltaY: container.clientHeight * cfg().scrollStepRatio,
+                            bubbles: true, cancelable: true,
+                        }));
+                    } catch (_) {}
+                    try {
+                        const last = messagesParent && messagesParent.lastElementChild;
+                        if (last && last.scrollIntoView) last.scrollIntoView({ block: 'end' });
+                    } catch (_) {}
+                    await sleep(cfg().scrollWaitMs);
+                }
                 if (stable >= cfg().stableLimit) break;
             } else {
                 stable = 0;
+                stuckTries = 0;
             }
             lastTop = top;
             container.scrollTop = top + container.clientHeight * cfg().scrollStepRatio;
             steps++;
-            await sleep(cfg().scrollWaitMs);
+            // Event-driven wait — wakes up as soon as the virtualizer
+            // adds a new node, or after the configured cap, whichever
+            // comes first.
+            await waitForMutationOrTimeout(messagesParent || container, cfg().scrollWaitMs);
         }
         await expandInView(container);
         captureVisible(container);
@@ -835,7 +979,13 @@
                 const i = idx++;
                 if (i >= urls.length) return;
                 const u = urls[i];
-                const data = await urlToDataURL(u);
+                let data = await urlToDataURL(u);
+                if (!data && !cancelled) {
+                    // One retry with a small randomized backoff. Most
+                    // transient CDN failures clear up within ~0.5s.
+                    await sleep(400 + Math.random() * 250);
+                    data = await urlToDataURL(u);
+                }
                 if (data && data.startsWith('data:')) { map.set(u, data); ok++; }
                 done++;
                 setProgress(T.downloading(done, total, ok));
@@ -870,8 +1020,14 @@
             });
             const roleClass = entry.role === 'user' ? 'msg user' : 'msg assistant';
             const roleLabel = entry.role === 'user' ? T.userLabel : T.assistantLabel;
+            const toolBadge = entry.tool
+                ? `<span class="tool-badge">${esc(entry.tool)}</span>` : '';
+            const modelBadge = (detectedModel && entry.role === 'assistant')
+                ? `<span class="model-badge">${esc(detectedModel)}</span>` : '';
+            const timeBadge = entry.time
+                ? `<span class="timestamp" title="${esc(entry.time)}">${esc(formatTimestamp(entry.time))}</span>` : '';
             parts.push(
-                `<section class="${roleClass}"><div class="role">${roleLabel} · #${n}</div>` +
+                `<section class="${roleClass}"><div class="role">${roleLabel} · #${n}${toolBadge}${modelBadge}${timeBadge}</div>` +
                 `<div class="body">${tmp.innerHTML}</div></section>`
             );
         }
@@ -886,6 +1042,9 @@ main{max-width:980px;margin:0 auto;padding:24px}
 .msg{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin:14px 0}
 .msg.user{background:var(--user)}
 .role{font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
+.tool-badge{display:inline-block;padding:1px 8px;background:rgba(110,168,254,.22);color:#6ea8fe;border-radius:4px;font-size:10px;font-weight:700;margin-left:8px;letter-spacing:.04em;vertical-align:middle}
+.model-badge{display:inline-block;padding:1px 8px;background:rgba(155,127,255,.2);color:#bba9ff;border-radius:4px;font-size:10px;font-weight:700;margin-left:6px;letter-spacing:.04em;vertical-align:middle}
+.timestamp{display:inline-block;color:var(--muted);font-size:11px;font-weight:400;margin-left:10px;text-transform:none;letter-spacing:0;vertical-align:middle}
 .body :where(p,ul,ol,table){margin:.5em 0}
 .body pre{background:var(--code);border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto;font:13px/1.5 "SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace}
 .body code{background:rgba(255,255,255,.08);padding:.1em .35em;border-radius:4px;font-family:"SFMono-Regular",Consolas,monospace;font-size:.92em}
@@ -940,6 +1099,9 @@ main{max-width:980px;margin:0 auto;padding:24px}
         try {
             chatContainer = findChatContainer();
             if (!chatContainer) { alert(T.noContainer); return; }
+            // Best-effort: read the model name from the page chrome once.
+            // Used to stamp a badge on assistant messages in the output.
+            detectedModel = extractModelName();
             setProgress(T.starting, true);
             await autoScroll(chatContainer);
             if (cancelled) { setProgress(T.cancelled, true); return; }

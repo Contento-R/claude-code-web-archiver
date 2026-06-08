@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-05-21
+
+### Added
+- **Tool-call badges (#11).** Each captured message is checked against
+  the public Claude Code tool list (Bash / Edit / Write / Read / Glob /
+  Grep / WebFetch / WebSearch / Task / TodoWrite / NotebookEdit /
+  NotebookRead / MultiEdit / ExitPlanMode / SlashCommand / KillShell).
+  Matches are rendered as a coloured badge next to the role label.
+  Detection is anchored to the leading text so a tool name appearing
+  later in prose doesn't false-positive; falls back to a
+  `data-testid*="tool"` lookup.
+- **Model name (#12).** Best-effort extraction from page chrome
+  (`[data-testid*="model"]`, `[aria-label*="opus|sonnet|haiku"]`, etc.)
+  at the start of each run; stamped as a badge on assistant messages.
+- **Date/time per message (#13).** Reads `<time datetime>` first, then
+  falls back to `[title]` / `[aria-label]` attributes containing a
+  timestamp pattern. Rendered in a clean `YYYY-MM-DD HH:MM` form (with
+  the raw value preserved in the `title` for hover).
+
+### Performance / reliability
+- **MutationObserver-driven scroll (#15).** `autoScroll` no longer
+  sleeps a fixed `scrollWaitMs` every step. Instead it waits for the
+  first DOM mutation in the messages-parent subtree, or the cap,
+  whichever comes first. On fast machines this is often <50 ms vs the
+  full 500 ms; on slow ones it falls back to the cap as before.
+- **Stuck-scroll mitigation (#19).** If `scrollTop` assignment is
+  ignored two times in a row, the script dispatches a synthetic
+  `wheel` event and calls `scrollIntoView` on the last message-parent
+  child. This recovers sessions where Claude Code Web's own scroll
+  handler intercepts assignments.
+- **Image retry (#18).** Each failed screenshot fetch is retried once
+  with a 400-650 ms randomized backoff before giving up.
+
 ## [1.3.0] - 2026-05-21
 
 ### Added
