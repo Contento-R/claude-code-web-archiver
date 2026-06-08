@@ -1,18 +1,23 @@
 # Claude Code Web Session Archiver
 
-> Save the **entire** Claude Code Web session — including history the cloud has already compacted — into a single self-contained HTML file with all screenshots embedded as data URLs.
+> Save the **entire** Claude Code Web session — including history the cloud has already compacted — into a single self-contained HTML file (or Markdown / JSON) with all screenshots embedded as data URLs.
 
-A small Tampermonkey / Violentmonkey / Greasemonkey userscript that adds a small, draggable green panel to [code.claude.com](https://code.claude.com), [claude.ai/code](https://claude.ai/code) and [claude.com/code](https://claude.com/code). The panel exposes three controls:
+A Tampermonkey / Violentmonkey / Greasemonkey userscript that adds a small, **auto-collapsing** green panel to [code.claude.com](https://code.claude.com), [claude.ai/code](https://claude.ai/code) and [claude.com/code](https://claude.com/code). The panel exposes five controls:
 
 | Button         | What it does                                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------------ |
-| ⬇ **Archive**  | Walk the entire session, capture every message, download screenshots, and save one self-contained HTML file.       |
-| ⚡ **Fast**     | Toggle. Minimizes scroll and expand delays and parallelizes screenshot downloads. Slightly more aggressive on the page. |
-| 📝 **No code** | Toggle. Excludes code blocks Claude writes (tool calls / `<pre>` blocks). Only the conversation is exported.       |
+| ⬇ **Archive**  | Walk the entire session, capture every message, download screenshots, and save one self-contained file.            |
+| ⚡ **Fast**     | Toggle. Aggressive scroll/expand delays and 10 parallel screenshot downloads instead of 6.                          |
+| 📝 **No code** | Toggle. Excludes code blocks Claude writes (tool calls, diffs, file viewers, `<pre>` fences) — only conversation.   |
+| ⚙ **Settings** | Output format (HTML/MD/JSON), only-new mode, range, local-only network, secret redaction, collapse assistant.       |
 
-The panel is draggable by the grip on its left edge — its position is remembered between visits.
+A drag handle (`⋮⋮`) on the left edge lets you reposition the panel anywhere on the page; position persists in `localStorage` and auto-clamps to the viewport on window resize so the panel can't disappear off-screen.
 
-The UI auto-selects **English** or **Russian** strings based on `navigator.language`.
+**3 seconds** after the cursor / focus leaves the panel it shrinks to a small green circle. Hover or focus expands it back. Auto-collapse is suspended while an archive is in progress or the settings modal is open. The whole circle is also draggable.
+
+**Hotkeys:** `Alt+A` start, `Esc` cancel.
+
+The UI auto-selects **English / Russian / German / French / Spanish** strings based on `navigator.language` (missing translations transparently fall back to English).
 
 [Русская версия README →](README.ru.md)
 
@@ -30,72 +35,68 @@ Claude Code Web compacts long sessions. Older turns disappear from the live thre
    - [Greasemonkey](https://www.greasespot.net/) (Firefox)
 2. Open the raw userscript — your manager will pick it up:
    [`claude-code-web-archiver.user.js`](https://github.com/Contento-R/claude-code-web-archiver/raw/main/claude-code-web-archiver.user.js)
-3. Confirm the install.
+3. Confirm the install. Subsequent updates are picked up automatically via `@updateURL`.
 4. Open any session at `https://code.claude.com/*`, `https://claude.ai/code/*` or `https://claude.com/code/*`. The green panel appears in the bottom-right corner.
 
 ## Use
 
 1. Open a Claude Code Web session.
-2. (Optional) Toggle **⚡ Fast** for faster capture, and / or **📝 No code** to skip code blocks.
-3. Click **⬇ Archive** and confirm the prompt.
+2. (Optional) Click ⚙ to choose output format and toggle features.
+3. Click **⬇ Archive** (or press `Alt+A`) and confirm the prompt.
 4. **Do not touch the page** while the archiver runs — interacting with it disrupts auto-scroll and capture.
 5. Watch the progress overlay:
    - `Scrolling & capturing... messages: N`
    - `Downloading screenshots... X/Y (Z ok)`
    - `Building HTML...`
    - `Done! Messages: N, images embedded: M.`
-6. A file named `<session-title>.html` is saved by your browser.
+6. A file named `<session-title>.html` (or `.md` / `.json`) is saved by your browser.
 
-Press **Cancel** in the progress card at any time to abort.
+Press **Cancel** in the progress card — or `Esc` — at any time to abort.
+
+### Output formats
+
+Picked in **Settings → Output format**:
+
+- **HTML** — interactive self-contained file. Includes live search, jump-to-message dropdown, light/dark theme toggle, collapse-all button for assistant blocks, and a print stylesheet for clean PDF exports.
+- **Markdown** — clean text with headings, lists, fenced code blocks, blockquotes, tables, links and image data URLs. For Obsidian, GitHub, etc.
+- **JSON** — structured document with per-message `number / role / tool / time / text / html` plus session-level `model`. For machine processing.
 
 ### Fast mode (⚡)
 
-When enabled, the script switches to an aggressive timing profile and parallelizes image downloads:
-
 |                       | Normal | Fast |
 | --------------------- | -----: | ---: |
-| Scroll wait (ms)      |    650 |  160 |
-| Expand wait (ms)      |    120 |   25 |
-| Scroll step (vh)      |   0.6  |  0.9 |
+| Scroll wait (ms)      |    500 |  140 |
+| Expand wait (ms)      |     90 |   20 |
+| Scroll step (vh)      |   0.7  |  0.9 |
 | Stable steps to stop  |      4 |    3 |
-| Parallel downloads    |      4 |    8 |
-
-Recommended on fast machines and good networks. On slow connections, leave it off — the page may need more time to render virtualised messages.
+| Parallel downloads    |      6 |   10 |
 
 ### No-code mode (📝)
 
-When enabled, the archiver removes `<pre>` blocks and `data-language` / `code-block` containers from each captured message before storing it. Inline `code` spans inside prose stay. Toggle this **before** clicking Archive — it only affects messages captured after the toggle.
+Removes code blocks Claude writes — tool calls (Bash, Edit, Write, …), `<pre>` fences, file viewers, monospace containers. Inline `code` spans inside prose stay. Detection uses computed `font-family` on the live DOM, so it works regardless of the upstream UI's class names.
 
-### Draggable panel
+### Settings
 
-Grab the `⋮⋮` grip on the left edge of the panel and drag it anywhere on the page. The position is saved in `localStorage` (`cc-arch-pos`) and restored next time you open Claude Code.
+- **Only new** — skip messages already archived for the same URL on previous runs. Per-URL known-key set, capped at 5000 entries.
+- **Range from/to** — export only the messages whose chronological number is in this range.
+- **Local-only network** — disable the cross-origin `GM_xmlhttpRequest` fallback. Images that need it stay as remote URLs instead of being inlined.
+- **Redact secrets** — newline-separated regex list. Defaults cover OpenAI/Anthropic keys, GitHub PATs, AWS access keys. Each match is replaced with asterisks at HTML build time, walked via `TreeWalker` so the regex can't corrupt tags.
+- **Collapse assistant** — wrap assistant message bodies in `<details>` so the exported HTML opens with conversation visible and responses collapsed.
 
-## Output format
+### Tool & metadata badges
 
-- Single `.html` file, self-contained, no external dependencies.
-- Dark theme, readable on desktop and mobile.
-- Each message is a `<section class="msg user|assistant">` with role label and message number.
-- Images are embedded as `data:` URLs so the file works fully offline.
-- Code blocks, tables, lists and `<details>` disclosures are preserved (unless **No code** is on).
-- Header includes archive timestamp, message count, source URL and parser version.
-- `<html lang>` is `en` or `ru` depending on browser locale.
+Each message in the output carries optional badges next to the role label:
+- **Tool call** (Bash / Edit / Write / Read / Glob / Grep / WebFetch / WebSearch / Task / TodoWrite / NotebookEdit / NotebookRead / MultiEdit / ExitPlanMode / SlashCommand / KillShell).
+- **Model name** (Opus / Sonnet / Haiku, extracted from page chrome).
+- **Timestamp** (`<time datetime>` or `[title]` containing a date/time pattern; formatted as `YYYY-MM-DD HH:MM`).
 
-## Configuration
+### Resume after crash
 
-The behaviour knobs live at the top of the script in `CFG_NORMAL` and `CFG_FAST`:
+If the browser tab is closed, refreshed or the archive is aborted mid-scroll, the next Archive click for the same URL offers to resume from the last snapshot (saved every ~5 seconds during the scroll phase, kept for 24 hours).
 
-| Key                | Normal | Fast | Meaning                                                      |
-| ------------------ | -----: | ---: | ------------------------------------------------------------ |
-| `scrollStepRatio`  |   0.6  |  0.9 | Fraction of viewport to scroll per step                      |
-| `scrollWaitMs`     |   650  |  160 | Delay after each scroll (ms) — increase on slow networks     |
-| `expandWaitMs`     |   120  |   25 | Delay after expanding an `aria-expanded` disclosure          |
-| `stableLimit`      |     4  |    3 | Consecutive no-progress steps before stopping                |
-| `maxSteps`         |  4000  | 4000 | Hard safety cap on total scroll steps                        |
-| `minTextLen`       |     8  |    8 | Ignore nodes shorter than this (filters empty wrappers)      |
-| `imgTimeoutMs`     | 20000  | 20000| Per-image download timeout (ms)                              |
-| `concurrency`      |     4  |    8 | Parallel screenshot downloads                                |
+### Update notifier
 
-Edit them in the installed script — your userscript manager applies changes immediately.
+The script does a daily background check against `main` on GitHub. When a newer version is published, a yellow dot appears on the ⚙ button and the settings modal shows a banner with an "Install" action that opens the raw URL — Tampermonkey then offers its normal reinstall prompt.
 
 ## Permissions / network
 
@@ -103,9 +104,10 @@ The script requests `GM_xmlhttpRequest` and `@connect` access to:
 
 - `code.claude.com`, `claude.ai`, `claude.com`, `anthropic.com` — message containers and attachments
 - `cloudfront.net`, `amazonaws.com` — image CDNs Claude uses
+- `raw.githubusercontent.com` — once a day, to read `@version` from the published userscript
 - `self` — same-origin fetches
 
-No data is sent anywhere. Everything happens locally in your browser and is written to a file you save yourself.
+No data is sent anywhere except the GitHub raw URL above for update detection.
 
 ## Compatibility
 
@@ -117,21 +119,13 @@ No data is sent anywhere. Everything happens locally in your browser and is writ
 | Safari             |      yes     |       —       |      —       |
 | Opera              |      yes     |      yes      |      —       |
 
-## Limitations
-
-- The script relies on DOM structure exposed by Claude Code Web. Major UI changes upstream may temporarily break selectors. PRs welcome.
-- Very long sessions can take minutes to scroll, expand and download screenshots — be patient and don't touch the tab.
-- Role detection is heuristic; the role label may occasionally be wrong on highly customised messages.
-- Attachments that aren't `<img>` elements (e.g. file downloads) are not embedded.
-- **No code** uses heuristics (`<pre>`, `[class*=code-block]`, `[data-language]`). Some rare code containers may slip through.
-
 ## Contributing
 
-Pull requests and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow.
+Pull requests and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 
-Based on **["Claude Code Web to Markdown"](https://greasyfork.org/scripts/560005)** by **Aiuanyu** (MIT). This fork adds full-session auto-capture, screenshot embedding, a self-contained HTML export, fast / no-code modes and a draggable panel.
+Based on **["Claude Code Web to Markdown"](https://greasyfork.org/scripts/560005)** by **Aiuanyu** (MIT).
 
 ## License
 

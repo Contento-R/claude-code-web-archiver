@@ -1779,6 +1779,8 @@ if(collapseBtn){
         } else {
             archiveBtn.textContent = '⬇';
             updateArchiveTooltip();
+            // Run is over — let the panel return to its idle circle.
+            scheduleCollapse();
         }
     }
 
@@ -1836,7 +1838,12 @@ if(collapseBtn){
             else el.value = cur[k] == null ? '' : cur[k];
         });
 
-        function close() { modal.remove(); }
+        function close() {
+            modal.remove();
+            // Modal blocked the collapse timer; restart it so the panel
+            // can shrink back into its idle circle.
+            scheduleCollapse();
+        }
         function commit() {
             const next = { ...cur };
             modal.querySelectorAll('[data-k]').forEach(el => {
