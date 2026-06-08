@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.1.4
+// @version      1.1.5
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Bilingual UI (EN/RU) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU по локали браузера.
 // @author       Contento-R
@@ -31,7 +31,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.1.4';
+    const VERSION = '1.1.5';
 
     // ===== I18N =====
     const I18N = {
@@ -180,11 +180,102 @@
             .filter(c => ((c.innerText || '').trim().length > cfg().minTextLen));
     }
 
-    // ===== ROLE GUESS =====
+    // ===== ROLE DETECTION =====
+    // Multi-strategy detector. Goes from the strongest signals (explicit role
+    // attributes the UI emits for accessibility / a11y / testing) down to
+    // weaker visual heuristics. Returns 'user' or 'assistant'.
+    const ROLE_ATTRS = [
+        'data-message-author-role',
+        'data-author-role',
+        'data-author',
+        'data-role',
+        'data-actor',
+        'data-sender',
+        'data-from',
+    ];
+    function classifyRoleString(s) {
+        if (!s) return null;
+        const v = String(s).toLowerCase();
+        if (/\b(user|human|you|prompt)\b/.test(v)) return 'user';
+        if (/\b(assistant|claude|agent|ai|model|bot|response)\b/.test(v)) return 'assistant';
+        return null;
+    }
+    function roleFromAttrs(el) {
+        if (!el || !el.getAttribute) return null;
+        for (const a of ROLE_ATTRS) {
+            const r = classifyRoleString(el.getAttribute(a));
+            if (r) return r;
+        }
+        const r = classifyRoleString(el.getAttribute('data-testid'));
+        if (r) return r;
+        const aria = classifyRoleString(el.getAttribute('aria-label'));
+        if (aria) return aria;
+        return null;
+    }
     function guessRole(node) {
-        const probe = (node.className || '') + ' ' + node.outerHTML.slice(0, 400);
-        if (/ml-auto|justify-end|items-end|text-right|self-end/.test(probe)) return 'user';
-        if (node.querySelector && node.querySelector('.bg-bg-200.rounded-lg')) return 'user';
+        // 1) Explicit role attributes on the node itself.
+        let r = roleFromAttrs(node);
+        if (r) return r;
+
+        // 2) Walk ancestors up to the chat container — Claude Code Web often
+        //    puts the role attribute on a wrapper several levels above.
+        for (let p = node.parentElement, i = 0; p && i < 10; p = p.parentElement, i++) {
+            if (p === chatContainer) break;
+            r = roleFromAttrs(p);
+            if (r) return r;
+        }
+
+        // 3) Look inside the node — sometimes the role lives on an inner
+        //    wrapper or on a hidden a11y label.
+        if (node.querySelectorAll) {
+            const sel = ROLE_ATTRS.map(a => `[${a}]`).join(',') + ',[data-testid],[aria-label]';
+            for (const el of node.querySelectorAll(sel)) {
+                r = roleFromAttrs(el);
+                if (r) return r;
+            }
+        }
+
+        // 4) Class-name patterns. Use word boundaries so "user" only matches
+        //    as its own token (not inside "ui-userland" etc.).
+        const cls = (node.className || '') + ' ' + node.outerHTML.slice(0, 2000);
+        const userClass = /(^|[\s"'_-])(user|human)([\s"'_-]|$)/i.test(cls);
+        const asstClass = /(^|[\s"'_-])(assistant|claude|agent|model)([\s"'_-]|$)/i.test(cls);
+        if (userClass && !asstClass) return 'user';
+        if (asstClass && !userClass) return 'assistant';
+
+        // 5) Visual alignment via computed style on the live node.
+        try {
+            const cs = getComputedStyle(node);
+            if (cs.alignSelf === 'flex-end' || cs.alignSelf === 'end') return 'user';
+            if (cs.textAlign === 'right' || cs.textAlign === 'end') return 'user';
+            if (cs.marginLeft === 'auto' && cs.marginRight !== 'auto') return 'user';
+        } catch (e) { /* ignore */ }
+        try {
+            const inner = node.firstElementChild;
+            if (inner) {
+                const cs = getComputedStyle(inner);
+                if (cs.alignSelf === 'flex-end' || cs.alignSelf === 'end') return 'user';
+                if (cs.marginLeft === 'auto' && cs.marginRight !== 'auto') return 'user';
+                if (cs.justifyContent === 'flex-end' || cs.justifyContent === 'end') return 'user';
+            }
+        } catch (e) { /* ignore */ }
+
+        // 6) Geometric fallback — a bubble offset noticeably to the right of
+        //    its parent's centre is almost certainly a user message.
+        try {
+            const rect = node.getBoundingClientRect();
+            const parent = node.parentElement;
+            if (parent && rect.width > 0) {
+                const prect = parent.getBoundingClientRect();
+                const leftGap = rect.left - prect.left;
+                const rightGap = prect.right - rect.right;
+                if (leftGap > 80 && leftGap > rightGap * 1.5) return 'user';
+            }
+        } catch (e) { /* ignore */ }
+
+        // 7) Old Tailwind hints (kept as last resort).
+        if (/ml-auto|justify-end|items-end|text-right|self-end/i.test(cls)) return 'user';
+
         return 'assistant';
     }
 

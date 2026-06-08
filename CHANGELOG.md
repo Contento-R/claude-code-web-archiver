@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] - 2026-05-21
+
+### Fixed
+- **Role detection (User vs Claude) is no longer stuck on stale Tailwind
+  classes.** The previous detector matched a couple of class names from an
+  older UI (`ml-auto`, `bg-bg-200.rounded-lg`) and read only the first 400
+  chars of `outerHTML`, so on the current Claude Code Web it labelled almost
+  everything as "Claude" (e.g. 2 out of 63 messages were User).
+  New detector tries signals in this order:
+  1. Explicit role attributes on the node (`data-message-author-role`,
+     `data-author`, `data-role`, `data-actor`, `data-sender`, `data-from`,
+     plus `data-testid` and `aria-label` classified by keyword).
+  2. Same attributes on ancestor wrappers up to the chat container.
+  3. Same attributes on descendants.
+  4. Word-bounded class-name patterns for `user|human` vs
+     `assistant|claude|agent|model`.
+  5. Computed style on the live node: `align-self: flex-end`,
+     `text-align: right/end`, `margin-left: auto` only.
+  6. Computed style on the first child (same checks plus `justify-content`).
+  7. Geometric fallback: visual offset of the bubble from its parent's
+     centre.
+  8. Legacy Tailwind hints as a last resort.
+
 ## [1.1.4] - 2026-05-21
 
 ### Fixed
