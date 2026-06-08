@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.8.0
+// @version      1.9.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.8.0';
+    const VERSION = '1.9.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -108,6 +108,11 @@
         startingNotice: 'Archiving — do not touch the page',
         resumingNotice: 'Resuming previous archive — do not touch the page',
         stopArchive: 'Stop archiving',
+        currentVersion: 'Current version',
+        checkUpdates: 'Check for updates',
+        checkingUpdates: 'Checking…',
+        noUpdates: 'You are on the latest version',
+        viewReleases: 'View releases',
     };
     const I18N = {
         en: I18N_EN,
@@ -180,6 +185,11 @@
             startingNotice: 'Архивирую — не трогай страницу',
             resumingNotice: 'Продолжаю архивацию — не трогай страницу',
             stopArchive: 'Остановить архивацию',
+            currentVersion: 'Текущая версия',
+            checkUpdates: 'Проверить обновления',
+            checkingUpdates: 'Проверяю…',
+            noUpdates: 'У вас актуальная версия',
+            viewReleases: 'Релизы на GitHub',
         },
         de: {
             htmlLang: 'de',
@@ -496,6 +506,44 @@
         if (settingsBtn) {
             settingsBtn.classList.add('has-update');
             try { settingsBtn.title = T.updateBadgeTitle(updateAvailableVersion); } catch (_) {}
+        }
+    }
+    // Forced check — used by the Settings modal's "Check for updates"
+    // button, bypassing the daily throttle and calling a callback so the
+    // modal can show the result.
+    function triggerManualUpdateCheck(cb) {
+        if (typeof GM_xmlhttpRequest === 'undefined') {
+            if (cb) cb({ ok: false, error: 'GM_xmlhttpRequest unavailable' });
+            return;
+        }
+        try { localStorage.setItem(UPDATE_CHECK_KEY, String(Date.now())); } catch (_) {}
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: UPDATE_RAW_URL,
+                timeout: 10000,
+                onload: (r) => {
+                    if (!r || r.status < 200 || r.status >= 300 || !r.responseText) {
+                        if (cb) cb({ ok: false, error: 'HTTP ' + (r && r.status) });
+                        return;
+                    }
+                    const m = r.responseText.match(/^\/\/\s*@version\s+(\d+\.\d+\.\d+)/m);
+                    if (!m) { if (cb) cb({ ok: false, error: 'no @version' }); return; }
+                    const latest = m[1];
+                    try { localStorage.setItem('cc-arch-latest-version', latest); } catch (_) {}
+                    if (compareVersions(latest, VERSION) > 0) {
+                        updateAvailableVersion = latest;
+                        showUpdateBadge();
+                        if (cb) cb({ ok: true, latest, isNewer: true });
+                    } else {
+                        if (cb) cb({ ok: true, latest, isNewer: false });
+                    }
+                },
+                onerror: () => { if (cb) cb({ ok: false, error: 'network' }); },
+                ontimeout: () => { if (cb) cb({ ok: false, error: 'timeout' }); },
+            });
+        } catch (e) {
+            if (cb) cb({ ok: false, error: String(e && e.message || e) });
         }
     }
     function checkForUpdate() {
@@ -1023,18 +1071,24 @@
     }
 
     // ===== ROLE NORMALIZATION =====
-    // Post-capture pass that re-classifies messages when the capture-time
-    // detector failed. STRUCTURE is the primary signal — message length is
-    // intentionally NOT used, because long user prompts (multi-paragraph
-    // instructions) would otherwise be mistaken for assistant output.
     //
-    // Heuristic:
-    //   - has tool call, <pre>, heading, list or table  → assistant
-    //   - matches a known system-message phrase pattern → assistant
-    //   - anything else                                  → user
-    //   - final guarantee: at least one user must exist  (force first by Y)
+    // The strategy here is the one the user described: identify what is
+    // DEFINITELY assistant output, identify ONE anchor user message
+    // (the very first prompt — by definition every session starts with
+    // one), use its visual signature to find other user messages, and
+    // default everything else to assistant.
+    //
+    // The previous structure-based heuristic mis-classified Claude's
+    // plain-text responses as user. Defaulting unknowns to assistant
+    // matches Claude Code Web's real ratio: dozens of assistant
+    // turns per user prompt.
+    //
+    // SYSTEM_PATTERNS covers Claude Code Web's own status/tool-output
+    // lines like "Editado un archivo, ejecutado un comando" / "Pushed
+    // v1.x.y" — all assistant-side output that has no structural
+    // markers a generic detector could pick up.
     const SYSTEM_PATTERNS = [
-        // EN
+        // EN — session / setup / tool-call status
         /^Session\s+(?:initialized|resumed|started|ended)/i,
         /^Done\b/i,
         /^Skipped\b/i,
@@ -1042,8 +1096,20 @@
         /^Add\s+(?:a\s+)?(?:setup|configuration)\s+script/i,
         /^Cloud\s+container\b/i,
         /^Configure\s+(?:cloud|a)\s+container/i,
-        /^Claude\s+Code\s+started/i,
+        /^Claude\s+Code\s+(?:started|iniciado)/i,
         /^Repositor(?:y|ies)\s+cloned/i,
+        /^Edited\s+(?:a|\d+)\s+files?/i,
+        /^Ran\s+(?:a\s+)?command/i,
+        /^Executed\s+(?:a\s+)?command/i,
+        /^Wrote\s+(?:a|\d+)\s+files?/i,
+        /^Read\s+(?:a|\d+)\s+files?/i,
+        /^Created\s+(?:a|\d+)\s+files?/i,
+        /^Pushed\b/i,
+        /^Committed\b/i,
+        /^Searched\b/i,
+        /^Fetched\b/i,
+        /^Browsed\b/i,
+        /^Pulled\b/i,
         // ES
         /^Sesión\s+(?:inicializada|reanudada|iniciada|finalizada)/i,
         /^Completado\b/i,
@@ -1052,8 +1118,15 @@
         /^Contenedor\s+(?:en\s+la\s+)?nube/i,
         /^Ejecutar\s+(?:el\s+)?script/i,
         /^Añade\s+un\s+script/i,
-        /^Claude\s+Code\s+iniciado/i,
         /^Repositorios?\s+clonados?/i,
+        /^Editado(?:s)?\s+(?:un|\d+)\s+archivos?/i,
+        /^Ejecutado(?:s)?\s+(?:un|el)\s+comando/i,
+        /^Escrito(?:s)?\s+(?:un|\d+)\s+archivos?/i,
+        /^Leído(?:s)?\s+(?:un|\d+)\s+archivos?/i,
+        /^Creado(?:s)?\s+(?:un|\d+)\s+archivos?/i,
+        /^Empuj[oé]/i,
+        /^Confirmado\b/i,
+        /^Buscado\b/i,
         // RU
         /^Сессия\s+(?:инициализирована|возобновлена|начата|завершена)/i,
         /^Готово\b/i,
@@ -1061,8 +1134,15 @@
         /^Облачный\s+контейнер/i,
         /^Запустить\s+скрипт/i,
         /^Добавить\s+скрипт/i,
-        /^Claude\s+Code\s+запущен/i,
         /^Репозитори[ия]\s+клонирован/i,
+        /^Отредактирован/i,
+        /^Запушил\b/i,
+        /^Запустил\b/i,
+        /^Прочитал\b/i,
+        /^Создал\b/i,
+        /^Записал\b/i,
+        /^Выполнил\b/i,
+        /^Скоммитил\b/i,
         // DE
         /^Sitzung\s+(?:initialisiert|wieder\s+aufgenommen|gestartet|beendet)/i,
         /^Fertig\b/i,
@@ -1070,8 +1150,9 @@
         /^Cloud[- ]Container\b/i,
         /^Setup-Skript\s+ausführen/i,
         /^Setup-Skript\s+hinzufügen/i,
-        /^Claude\s+Code\s+gestartet/i,
         /^Repositor(?:y|ies|ien)\s+geklont/i,
+        /^Datei(?:en)?\s+bearbeitet/i,
+        /^Befehl\s+ausgeführt/i,
         // FR
         /^Session\s+(?:initialisée|reprise|démarrée|terminée)/i,
         /^Terminé\b/i,
@@ -1079,46 +1160,105 @@
         /^Conteneur\s+(?:cloud|infonuagique)/i,
         /^Exécuter\s+(?:le\s+)?script/i,
         /^Ajouter\s+un\s+script/i,
-        /^Claude\s+Code\s+démarré/i,
         /^Dépôts?\s+clon[éee]s?/i,
+        /^Fichiers?\s+modifi[éees]+/i,
+        /^Commande\s+exécutée/i,
     ];
+    const TRANSPARENT_BG = new Set(['', 'transparent', 'rgba(0, 0, 0, 0)', 'rgba(0,0,0,0)']);
 
-    function isLikelyAssistant(entry) {
+    function matchesSystemPhrase(text) {
+        if (!text) return false;
+        for (const re of SYSTEM_PATTERNS) if (re.test(text)) return true;
+        return false;
+    }
+
+    // "Definite assistant" = signals we trust 100%. Used to skip past
+    // leading system messages when locating the first user prompt, and
+    // to override visual signature matches.
+    function isDefinitelyAssistant(entry) {
         if (entry.tool) return true;
         const s = entry.signals;
         if (!s) return false;
-        if (s.hasPre || s.hasH || s.hasList || s.hasTable) return true;
-        const head = s.text || '';
-        for (const re of SYSTEM_PATTERNS) {
-            if (re.test(head)) return true;
-        }
+        if (matchesSystemPhrase(s.text || '')) return true;
         return false;
+    }
+
+    // Soft signal — anything beyond the definite list. We don't trust it
+    // in isolation, but it makes us prefer "assistant" when we have to
+    // pick between similar candidates.
+    function hasComplexStructure(entry) {
+        const s = entry.signals;
+        if (!s) return false;
+        return s.hasPre || s.hasH || s.hasList || s.hasTable;
     }
 
     function normalizeRoles() {
         const entries = [...messages.values()];
-        if (entries.length < 2) return 0;
+        if (entries.length === 0) return 0;
 
-        // Skip if we already have a sensible split (user count between
-        // 3% and 70% of total).
-        const userCount = entries.filter(e => e.role === 'user').length;
-        const total = entries.length;
-        const tooFew = userCount === 0 || userCount < Math.max(1, Math.floor(total * 0.03));
-        const tooMany = userCount > total * 0.7;
-        if (!tooFew && !tooMany) return 0;
+        const sorted = entries.slice().sort((a, b) => (a.y - b.y) || (a.seq - b.seq));
+
+        // 1. Locate the first message that ISN'T definitely assistant
+        //    (definitely-assistant = tool call or matches a system phrase
+        //    like "Sesión inicializada", "Editado un archivo"). That
+        //    message is the user's opening prompt — by Claude Code Web's
+        //    own convention, every session starts with one.
+        let anchorIdx = 0;
+        for (let i = 0; i < sorted.length; i++) {
+            if (!isDefinitelyAssistant(sorted[i])) { anchorIdx = i; break; }
+            if (i === sorted.length - 1) { anchorIdx = 0; }
+        }
 
         let changed = 0;
-        for (const e of entries) {
-            const expected = isLikelyAssistant(e) ? 'assistant' : 'user';
-            if (e.role !== expected) { e.role = expected; changed++; }
-        }
+        const reassign = (e, role) => { if (e.role !== role) { e.role = role; changed++; } };
 
-        // Guarantee at least one user message — every session starts with one.
-        if (entries.filter(e => e.role === 'user').length === 0) {
-            const first = entries.slice().sort((a, b) => a.y - b.y || a.seq - b.seq)[0];
-            if (first) { first.role = 'user'; changed++; }
+        // Everything before the anchor (system status, setup messages) is assistant.
+        for (let i = 0; i < anchorIdx; i++) reassign(sorted[i], 'assistant');
+        const anchor = sorted[anchorIdx];
+        reassign(anchor, 'user');
+
+        // 2. Compute the user-anchor's visual signature (background colour).
+        //    Use it ONLY if it's both non-transparent AND a clear minority
+        //    in the whole conversation. Otherwise we'd label everything
+        //    "user" because Claude's responses share the same bg.
+        const userBg = (anchor.signals && anchor.signals.bg) || '';
+        let userBgCount = 0;
+        if (!TRANSPARENT_BG.has(userBg)) {
+            for (const e of sorted) {
+                if (((e.signals && e.signals.bg) || '') === userBg) userBgCount++;
+            }
         }
-        console.debug('[archiver] normalizeRoles updated', changed, 'of', total, 'messages');
+        const userBgIsMinority = !TRANSPARENT_BG.has(userBg) && userBgCount * 2 <= sorted.length;
+        const useBgMatching = userBgIsMinority;
+
+        // 3. For each remaining message, decide. Definite-assistant wins.
+        //    Otherwise, use bg signature ONLY if it's a reliable minority
+        //    signal. Default to assistant — per the user's spec:
+        //    "identify user messages, treat all others as Claude".
+        for (let i = anchorIdx + 1; i < sorted.length; i++) {
+            const e = sorted[i];
+            let role;
+            if (isDefinitelyAssistant(e)) {
+                role = 'assistant';
+            } else if (useBgMatching && ((e.signals && e.signals.bg) || '') === userBg) {
+                // Same bg as the anchor user → also user. Even with markdown
+                // structure (users can write structured prompts).
+                role = 'user';
+            } else if (hasComplexStructure(e)) {
+                role = 'assistant';
+            } else {
+                role = 'assistant';
+            }
+            reassign(e, role);
+        }
+        console.debug('[archiver] normalizeRoles', {
+            total: sorted.length,
+            anchorIdx,
+            userBg,
+            userBgIsMinority,
+            useBgMatching,
+            changed,
+        });
         return changed;
     }
 
@@ -1730,6 +1870,16 @@ if(collapseBtn){
 .cc-arch-panel.collapsed.has-update::after{content:'';position:absolute;top:-2px;right:-2px;width:10px;height:10px;background:#fbbf24;border-radius:50%;border:2px solid #14532d;box-sizing:border-box;display:block !important}
 .cc-arch-update-notice{background:rgba(251,191,36,.16);border:1px solid #fbbf24;color:#fde68a;padding:8px 12px;border-radius:6px;margin:0 0 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px}
 .cc-arch-update-notice button{background:#fbbf24;color:#0f1115;border:none;border-radius:4px;padding:5px 12px;cursor:pointer;font-weight:700;font-size:12px}
+.cc-arch-release-section{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin:6px 0 14px;padding:10px 12px;background:rgba(255,255,255,.04);border:1px solid #2a2f3a;border-radius:6px;font-size:12px}
+.cc-arch-version-line{color:#9aa4b2;line-height:1.4}
+.cc-arch-version-line strong{color:#e6e8eb;font-weight:600}
+.cc-arch-update-result.latest{color:#16a34a}
+.cc-arch-update-result.newer{color:#fbbf24}
+.cc-arch-update-result.error{color:#b91c1c}
+.cc-arch-release-buttons{display:flex;gap:6px;flex-wrap:wrap}
+.cc-arch-release-buttons button{background:#374151;color:#fff;border:none;border-radius:5px;padding:5px 12px;cursor:pointer;font-weight:600;font-size:12px}
+.cc-arch-release-buttons button:hover{filter:brightness(1.2)}
+.cc-arch-release-buttons button:disabled{opacity:.5;cursor:not-allowed}
 .cc-arch-start-banner{position:fixed;top:18px;left:50%;transform:translateX(-50%) translateY(-30px);background:#16a34a;color:#fff;padding:11px 22px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.5);z-index:2147483647;font:600 13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;opacity:0;transition:opacity .25s ease,transform .25s ease;pointer-events:none;max-width:80vw;text-align:center;white-space:nowrap}
 .cc-arch-start-banner.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .cc-arch-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483646;display:flex;align-items:flex-end;justify-content:center;padding-bottom:90px;pointer-events:none}
@@ -1840,9 +1990,17 @@ if(collapseBtn){
                 <button type="button" data-act="install-update">${esc(T.updateInstall)}</button>
               </div>`
             : '';
+        const releaseSection = `<div class="cc-arch-release-section">
+  <div class="cc-arch-version-line">${esc(T.currentVersion)}: <strong>v${esc(VERSION)}</strong><span id="cca-update-result"></span></div>
+  <div class="cc-arch-release-buttons">
+    <button type="button" data-act="check-update">${esc(T.checkUpdates)}</button>
+    <button type="button" data-act="view-releases">${esc(T.viewReleases)}</button>
+  </div>
+</div>`;
         modal.innerHTML = `<div class="cc-arch-modal-card">
   <h2>${esc(T.settingsTitle)}</h2>
   ${updateNotice}
+  ${releaseSection}
   <label class="block"><span>${esc(T.settingsFormat)}</span>
     <select data-k="outputFormat">
       <option value="html">${esc(T.settingsFormatHtml)}</option>
@@ -1924,6 +2082,52 @@ if(collapseBtn){
             // Open the raw userscript URL — Tampermonkey/Violentmonkey
             // intercepts it and offers the reinstall prompt.
             window.open(UPDATE_RAW_URL, '_blank', 'noopener');
+        };
+        const checkBtn = q('[data-act=check-update]');
+        const resultEl = q('#cca-update-result');
+        if (checkBtn) checkBtn.onclick = () => {
+            checkBtn.disabled = true;
+            const origText = checkBtn.textContent;
+            checkBtn.textContent = T.checkingUpdates;
+            if (resultEl) resultEl.textContent = '';
+            triggerManualUpdateCheck((res) => {
+                checkBtn.disabled = false;
+                checkBtn.textContent = origText;
+                if (!res || !res.ok) {
+                    if (resultEl) {
+                        resultEl.textContent = ' — ' + (res && res.error ? res.error : '?');
+                        resultEl.className = 'cc-arch-update-result error';
+                    }
+                    return;
+                }
+                if (res.isNewer) {
+                    if (resultEl) {
+                        resultEl.textContent = ' — ' + T.updateAvailable(res.latest);
+                        resultEl.className = 'cc-arch-update-result newer';
+                    }
+                    // Inject the notice banner if it isn't already on the modal.
+                    if (!q('[data-act=install-update]')) {
+                        const noticeHtml = `<div class="cc-arch-update-notice">
+                            <span>${esc(T.updateAvailable(res.latest))}</span>
+                            <button type="button" data-act="install-update">${esc(T.updateInstall)}</button>
+                          </div>`;
+                        const card = modal.querySelector('.cc-arch-modal-card');
+                        const h2 = card.querySelector('h2');
+                        h2.insertAdjacentHTML('afterend', noticeHtml);
+                        const newInstall = card.querySelector('[data-act=install-update]');
+                        newInstall.onclick = () => window.open(UPDATE_RAW_URL, '_blank', 'noopener');
+                    }
+                } else {
+                    if (resultEl) {
+                        resultEl.textContent = ' — ' + T.noUpdates;
+                        resultEl.className = 'cc-arch-update-result latest';
+                    }
+                }
+            });
+        };
+        const releasesBtn = q('[data-act=view-releases]');
+        if (releasesBtn) releasesBtn.onclick = () => {
+            window.open('https://github.com/Contento-R/claude-code-web-archiver/releases', '_blank', 'noopener');
         };
         modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
         // Esc closes the modal (don't conflict with cancel-archive, which

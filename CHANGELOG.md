@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-06-02
+
+### Fixed
+- **Role detection — third rewrite, anchor-based.** The previous
+  "structure-based" detector still labelled the first user prompt as
+  assistant whenever the user wrote a long message, and labelled
+  Claude's plain-text replies as user. The new strategy follows what
+  the user asked for: identify a single anchor user message and
+  default everything else to assistant. Specifically:
+  - **Anchor**: walk messages in chronological order and pick the
+    first one that isn't *definitely* assistant (i.e. doesn't have a
+    tool call and doesn't match a multilingual system-phrase pattern).
+    That message is forced to **user** — every Claude Code session
+    starts with one by definition.
+  - **Visual-signature matching**: the anchor's `backgroundColor` is
+    used to find other user prompts in the same session, but ONLY if
+    it's both non-transparent AND a clear minority (≤50% of messages).
+    Prevents the failure mode where all messages share a colour and
+    everything gets labelled user.
+  - **Default to assistant**: per the user's spec, any message we
+    can't confidently identify as user is treated as assistant.
+- Expanded `SYSTEM_PATTERNS` to recognize the tool-call status lines
+  Claude Code Web emits (`Editado un archivo, ejecutado un comando`,
+  `Pushed`, `Запушил`, `Datei bearbeitet`, `Fichier modifié`, etc.).
+
+### Added
+- **Release section in Settings.** A bordered panel near the top of
+  the settings modal showing the current version (`v1.9.0`) plus two
+  buttons:
+  - **Check for updates** — forces an update check ignoring the daily
+    throttle, reports the result inline (`latest version` /
+    `update available` / error), and injects the install banner if a
+    newer version is found.
+  - **View releases** — opens
+    `https://github.com/Contento-R/claude-code-web-archiver/releases`
+    in a new tab.
+- New `currentVersion` / `checkUpdates` / `checkingUpdates` /
+  `noUpdates` / `viewReleases` strings in EN + RU dictionaries
+  (other locales fall back to English via the i18n Proxy).
+
 ## [1.8.0] - 2026-05-21
 
 ### Fixed
