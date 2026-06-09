@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.3] - 2026-06-09
+
+### Fixed
+- **"Mostrar más" / "Show more" toggles in user messages are now
+  clicked before capture.** Long user prompts in Claude Code Web get
+  collapsed under a button with the localised "Show more" label —
+  these buttons have no `aria-expanded` marker, so the existing
+  expansion logic didn't touch them and the export only contained the
+  truncated head plus the literal button text. New `EXPAND_PHRASES`
+  list covers EN / ES / RU / DE / FR / JP / ZH variants
+  (`show more`, `Mostrar más`, `Показать ещё`, `Mehr anzeigen`,
+  `Voir plus`, `もっと見る`, `展开`, etc.) and is matched against
+  each in-viewport `<button>` / `[role=button]` text. Collapse /
+  "show less" variants are intentionally excluded so a second pass
+  doesn't immediately re-collapse what we just opened.
+
+### Diagnostic
+- `sanitizeClone` now emits a single `console.warn` the first time it
+  strips code in a given run:
+  `[archiver] stripCode IS active for this run — skipCode is true.`
+  Lets a user with "code keeps disappearing from the export" verify
+  in DevTools whether stripping is the real cause (warning shows ⇒
+  the No-code toggle is somehow on; no warning ⇒ the missing content
+  is from something else and we need a fresh debug-mode dump).
+
 ## [1.11.2] - 2026-06-08
 
 ### Removed

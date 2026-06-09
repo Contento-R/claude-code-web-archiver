@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.2
+// @version      1.11.3
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.2';
+    const VERSION = '1.11.3';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -449,7 +449,7 @@
     const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
     const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
     let lastResumeSaveTs = 0;
-    // Snapshot saving is disabled in v1.11.2 along with auto-resume.
+    // Snapshot saving is disabled in v1.11.3 along with auto-resume.
     // Kept as a no-op so the call sites in autoScroll don't need touching.
     function saveResumeSnapshot() { /* intentionally empty */ }
     function loadResumeSnapshot() {
@@ -976,9 +976,20 @@
     }
 
     // ===== SANITIZE A LIVE NODE INTO PORTABLE HTML =====
+    let sanitizeCodeStripCount = 0;
     function sanitizeClone(node) {
         const clone = node.cloneNode(true);
-        if (skipCode) stripCode(clone, node);
+        if (skipCode) {
+            // Bright diagnostic so a user complaining about "code keeps
+            // being stripped" can verify whether stripCode is actually
+            // being called in their run. Only printed for the first
+            // message we strip so the console isn't flooded.
+            if (sanitizeCodeStripCount === 0) {
+                console.warn('[archiver] stripCode IS active for this run — skipCode is true. Toggle "No code" off in the panel to keep code.');
+            }
+            sanitizeCodeStripCount++;
+            stripCode(clone, node);
+        }
         const liveImgs = node.querySelectorAll('img');
         const cloneImgs = clone.querySelectorAll('img');
         for (let i = 0; i < cloneImgs.length; i++) {
@@ -1006,6 +1017,32 @@
     }
 
     // ===== EXPAND DISCLOSURE ELEMENTS IN VIEW =====
+    // Multilingual list of phrases that indicate an "expand / show more"
+    // toggle inside a message bubble (long user prompts use these to
+    // hide the tail under a click). EXCLUDES collapse / "show less"
+    // variants so we don't immediately re-collapse what we just opened.
+    const EXPAND_PHRASES = [
+        // EN
+        'show more', 'show all', 'show full', 'see more', 'read more', 'expand',
+        // ES
+        'mostrar más', 'mostrar mas', 'mostrar todo', 'mostrar completo',
+        'ver más', 'ver mas', 'ver todo',
+        // RU
+        'показать ещё', 'показать еще', 'показать больше',
+        'показать всё', 'показать все', 'развернуть',
+        // DE
+        'mehr anzeigen', 'mehr lesen', 'mehr',
+        // FR
+        'voir plus', 'afficher plus',
+        // JP / ZH
+        '全部表示', 'もっと見る', 'もっと読む', '展开',
+    ];
+    function isExpandToggle(text) {
+        const t = (text || '').toLowerCase().replace(/[…\.…]+$/, '').trim();
+        if (!t || t.length > 60) return false;
+        return EXPAND_PHRASES.some(p => t === p || t.includes(p));
+    }
+
     async function expandInView(container) {
         const detailsToOpen = [];
         if (!skipCode) {
@@ -1017,14 +1054,29 @@
             if (cancelled) return;
             try { d.open = true; } catch (_) {}
         }
+        const wait = cfg().expandWaitMs;
         const ariaToClick = [];
         for (const el of container.querySelectorAll('[aria-expanded="false"]')) {
             if (inViewport(el.getBoundingClientRect())) ariaToClick.push(el);
         }
-        const wait = cfg().expandWaitMs;
         for (const el of ariaToClick) {
             if (cancelled) return;
             try { el.click(); } catch (_) {}
+            if (wait > 0) await sleep(wait);
+        }
+        // Also handle in-bubble "Show more / Mostrar más" toggles on long
+        // user messages. They're plain `<button>` elements without an
+        // aria-expanded marker, so we match by visible text.
+        const showMoreToClick = [];
+        for (const btn of container.querySelectorAll('button, [role="button"]')) {
+            const txt = (btn.textContent || '').trim();
+            if (!isExpandToggle(txt)) continue;
+            if (!inViewport(btn.getBoundingClientRect())) continue;
+            showMoreToClick.push(btn);
+        }
+        for (const btn of showMoreToClick) {
+            if (cancelled) return;
+            try { btn.click(); } catch (_) {}
             if (wait > 0) await sleep(wait);
         }
     }
@@ -1952,6 +2004,7 @@ if(collapseBtn){
         messagesParent = null;
         seenNodes = new WeakSet();
         debugBuffer = [];
+        sanitizeCodeStripCount = 0;
         // Refresh settings each run so changes from the modal apply
         // immediately, and refresh redact patterns in case they changed.
         settings = loadSettings();
@@ -2617,7 +2670,7 @@ if(collapseBtn){
     }
 
     function init() {
-        // Defensive cleanup: v1.11.2 disabled auto-resume entirely, but
+        // Defensive cleanup: v1.11.3 disabled auto-resume entirely, but
         // older versions could have left a snapshot in localStorage that
         // would no longer do anything useful. Drop it on every script
         // load so users with stuck state get a fresh start automatically.
