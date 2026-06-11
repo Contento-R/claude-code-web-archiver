@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.8] - 2026-06-11
+
+### Fixed (suspected wrapToolCalls data loss)
+- `wrapToolCalls` previously did `btn.replaceWith(details)` after
+  copying only `btn.textContent` into the `<summary>`. **Every child
+  of the button was discarded.** If a tool widget rendered its body
+  (file content, command output, diff) NESTED inside the button —
+  not as a separate sibling — that body went straight to the bin in
+  the sanitisation step, so the export had nothing to show. The new
+  loop moves the button's full subtree into the details body before
+  replacing the button, in addition to following `aria-controls`
+  (the canonical disclosure pointer) and the legacy "next sibling
+  is the body" path.
+
+### Diagnostic (debug-mode dump expanded)
+- `textContent length: N` and `Text tail (last 300 chars)` lines
+  show whether the full body is in the node beyond the head preview
+  or only the head is there at all. If `length` is huge but the tail
+  is "Buscado/…/prisma/**", the body is captured and the bug is in
+  sanitisation; if `length` matches just the labels, capture itself
+  is dropping the body.
+- `OUTERHTML HEAD` raised from 700 to 5000 chars so the structure
+  past the first tool button is visible.
+- Button dump now also logs `aria-controls`, the canonical pointer
+  to a separately-mounted body panel. If the body lives in a portal
+  with an ID referenced here, we can splice it inline.
+
 ## [1.11.7] - 2026-06-11
 
 ### Fixed (attempt 2 at tool body capture)

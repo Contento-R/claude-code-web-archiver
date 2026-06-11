@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.7
+// @version      1.11.8
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.7';
+    const VERSION = '1.11.8';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -450,7 +450,7 @@
     const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
     const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
     let lastResumeSaveTs = 0;
-    // Snapshot saving is disabled in v1.11.7 along with auto-resume.
+    // Snapshot saving is disabled in v1.11.8 along with auto-resume.
     // Kept as a no-op so the call sites in autoScroll don't need touching.
     function saveResumeSnapshot() { /* intentionally empty */ }
     function loadResumeSnapshot() {
@@ -1009,8 +1009,22 @@
             const summary = document.createElement('summary');
             summary.textContent = ((btn.textContent || '').replace(/\s+/g, ' ').trim()).slice(0, 220) || 'Tool call';
             details.appendChild(summary);
-            // The button's IMMEDIATE next sibling is the expandable
-            // content panel. If present, move it into the details body.
+            // Preserve EVERYTHING the button's subtree carries — for some
+            // tool widgets in Claude Code Web the body (file content,
+            // command output, diff) is nested INSIDE the button, not as
+            // a sibling. Moving all children into the details body costs
+            // a duplicated label (it appears in <summary> already) but
+            // guarantees we don't drop the body. Visually that's an extra
+            // line at the top of the expanded panel — acceptable trade.
+            while (btn.firstChild) details.appendChild(btn.firstChild);
+            // Also follow `aria-controls` if the button has one — that's
+            // the canonical pointer to a separately-mounted body panel.
+            const ctrl = btn.getAttribute('aria-controls');
+            if (ctrl) {
+                const target = clone.querySelector('#' + CSS.escape(ctrl));
+                if (target) details.appendChild(target);
+            }
+            // And the legacy "next sibling = body" case.
             const next = btn.nextElementSibling;
             if (next) details.appendChild(next);
             btn.replaceWith(details);
@@ -1212,8 +1226,12 @@
         block.push(`MESSAGE #${idx}    detected role: ${role}`);
         block.push(`========================================`);
         block.push(`Y position: ${Math.round((rect.top || 0))}`);
-        block.push(`Text preview (200 chars):`);
-        block.push(`  ${(text || '').slice(0, 200).replace(/\s+/g, ' ').trim()}`);
+        const fullText = (text || '');
+        block.push(`textContent length: ${fullText.length}`);
+        block.push(`Text preview (200 chars, head):`);
+        block.push(`  ${fullText.slice(0, 200).replace(/\s+/g, ' ').trim()}`);
+        block.push(`Text tail (last 300 chars):`);
+        block.push(`  ${fullText.slice(-300).replace(/\s+/g, ' ').trim()}`);
         block.push('');
 
         block.push(`-- NODE --`);
@@ -1282,7 +1300,8 @@
                 const tx = (btn.textContent || '').trim();
                 const cls = ((btn.className && btn.className.baseVal) || btn.className || '').toString();
                 const expanded = btn.getAttribute('aria-expanded');
-                buttons.push(`  button aria-expanded=${JSON.stringify(expanded)} aria-label=${JSON.stringify(aria.slice(0, 60))} title=${JSON.stringify(title.slice(0, 60))} text=${JSON.stringify(tx.slice(0, 60))} class=${JSON.stringify(cls.slice(0, 100))}`);
+                const controls = btn.getAttribute('aria-controls');
+                buttons.push(`  button aria-expanded=${JSON.stringify(expanded)} aria-controls=${JSON.stringify(controls)} aria-label=${JSON.stringify(aria.slice(0, 60))} title=${JSON.stringify(title.slice(0, 60))} text=${JSON.stringify(tx.slice(0, 60))} class=${JSON.stringify(cls.slice(0, 100))}`);
                 i++;
             }
         } catch (_) {}
@@ -1302,8 +1321,8 @@
         }
         block.push('');
 
-        block.push(`-- OUTERHTML HEAD (first 700 chars) --`);
-        block.push((node.outerHTML || '').slice(0, 700));
+        block.push(`-- OUTERHTML HEAD (first 5000 chars) --`);
+        block.push((node.outerHTML || '').slice(0, 5000));
         block.push('');
         block.push('');
 
@@ -2792,7 +2811,7 @@ if(collapseBtn){
     }
 
     function init() {
-        // Defensive cleanup: v1.11.7 disabled auto-resume entirely, but
+        // Defensive cleanup: v1.11.8 disabled auto-resume entirely, but
         // older versions could have left a snapshot in localStorage that
         // would no longer do anything useful. Drop it on every script
         // load so users with stuck state get a fresh start automatically.
