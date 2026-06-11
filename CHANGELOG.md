@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.5] - 2026-06-11
+
+### Added
+- **Tool-call widgets render as collapsible `<details>` in the export.**
+  Each Claude Code Web tool widget (`<button class="… group/tool …">`
+  followed by its expanded panel) is now transformed during sanitisation
+  into:
+  ```
+  <details>
+    <summary>{tool label}</summary>
+    {body — command output, file diff, etc.}
+  </details>
+  ```
+  The user reading the exported HTML in a browser sees a compact
+  collapsible block by default (chevron + summary line), can click to
+  expand individual calls. Any machine parser — Claude itself reading
+  the file as an attachment included — sees the full body inside the
+  `<details>` because the content is still in the DOM, just visually
+  collapsed; `<details>` is standard HTML, no JS needed to expose.
+- Nested tool calls (e.g. an `Ejecutado 22 comandos` group with
+  individual `EjecutadoFind all package.json files` sub-widgets) are
+  handled by sorting widgets deepest-first before wrapping, so inner
+  `<details>` elements end up nested inside their outer container.
+- Styled the exported `<details>` blocks: subtle code-coloured
+  background, accent-coloured chevron in the summary that rotates 90°
+  when open, hidden default disclosure marker, tighter inner padding
+  when closed.
+
 ## [1.11.4] - 2026-06-11
 
 ### Fixed

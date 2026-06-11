@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.4
+// @version      1.11.5
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.4';
+    const VERSION = '1.11.5';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -449,7 +449,7 @@
     const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
     const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
     let lastResumeSaveTs = 0;
-    // Snapshot saving is disabled in v1.11.4 along with auto-resume.
+    // Snapshot saving is disabled in v1.11.5 along with auto-resume.
     // Kept as a no-op so the call sites in autoScroll don't need touching.
     function saveResumeSnapshot() { /* intentionally empty */ }
     function loadResumeSnapshot() {
@@ -975,6 +975,52 @@
         }
     }
 
+    // ===== WRAP TOOL-CALL WIDGETS AS <details>/<summary> =====
+    // Claude Code Web's tool calls (Bash, Edit, Read, Grep, etc.) are
+    // <button class="… group/tool …"> followed by their expandable
+    // body. In the rendered chat they're collapsed by default and
+    // the user clicks to open. The export preserves that behaviour
+    // by transforming each (button + content) pair into
+    //   <details><summary>tool label</summary>…body…</details>
+    // <details> is closed by default in HTML, so a human reader gets
+    // the compact summary view, while any machine parser (including
+    // Claude reading the exported file as input) sees the full body
+    // — the content is in the DOM, just not visually expanded.
+    function wrapToolCalls(clone) {
+        if (!clone || !clone.querySelectorAll) return;
+        const toolBtns = [];
+        for (const el of clone.querySelectorAll('button, [role="button"]')) {
+            const cls = el.getAttribute('class') || '';
+            // The Tailwind utility marker for these widgets — also used as
+            // the CSS group selector for child styling. Stable across
+            // recent Claude Code Web builds (verified from DOM dumps).
+            if (cls.indexOf('group/tool') !== -1) toolBtns.push(el);
+        }
+        if (toolBtns.length === 0) return;
+        // Sort deepest-first so inner tool calls (e.g. each sub-command
+        // inside an "Ejecutado 22 comandos" group) are wrapped before
+        // their outer container — that way the outer wrap correctly
+        // contains the already-wrapped inner details.
+        toolBtns.sort((a, b) => depthOf(b) - depthOf(a));
+        for (const btn of toolBtns) {
+            if (!btn.isConnected) continue;
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.textContent = ((btn.textContent || '').replace(/\s+/g, ' ').trim()).slice(0, 220) || 'Tool call';
+            details.appendChild(summary);
+            // The button's IMMEDIATE next sibling is the expandable
+            // content panel. If present, move it into the details body.
+            const next = btn.nextElementSibling;
+            if (next) details.appendChild(next);
+            btn.replaceWith(details);
+        }
+    }
+    function depthOf(el) {
+        let d = 0;
+        for (let n = el.parentElement; n; n = n.parentElement) d++;
+        return d;
+    }
+
     // ===== SANITIZE A LIVE NODE INTO PORTABLE HTML =====
     let sanitizeCodeStripCount = 0;
     function sanitizeClone(node) {
@@ -999,6 +1045,14 @@
             cloneImgs[i].removeAttribute('data-src');
         }
         clone.querySelectorAll('script,style,svg,noscript,input,textarea').forEach(e => e.remove());
+        // Wrap each tool-call widget as <details><summary>…</summary>content</details>
+        // BEFORE the button→span conversion below — by class name we
+        // can still see which buttons are tool calls. The details
+        // element is closed by default in HTML, so the human reader
+        // sees a compact collapsible block while parsers (Claude
+        // included) still get every byte of command output and file
+        // content inside the details body.
+        wrapToolCalls(clone);
         clone.querySelectorAll('button,[role="button"]').forEach(b => {
             const span = document.createElement('span');
             span.innerHTML = b.innerHTML;
@@ -1913,8 +1967,13 @@ main{max-width:980px;margin:0 auto;padding:24px}
 .body a{color:var(--accent)}
 .body table{border-collapse:collapse;width:100%}
 .body th,.body td{border:1px solid var(--border);padding:6px 10px;text-align:left}
-.body details{border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:8px 0}
-.body summary{cursor:pointer;color:var(--muted)}
+.body details{border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:8px 0;background:color-mix(in srgb,var(--code) 50%,transparent)}
+.body details[open]{padding-bottom:12px}
+.body summary{cursor:pointer;color:var(--muted);font-weight:600;font-size:13px;list-style:none;display:flex;align-items:center;gap:6px;user-select:none}
+.body summary::before{content:'▸';color:var(--accent);transition:transform .15s ease;display:inline-block;font-size:11px}
+.body details[open] > summary::before{transform:rotate(90deg)}
+.body summary::-webkit-details-marker{display:none}
+.body details > *:not(summary){margin-top:8px}
 .msg > details > summary{cursor:pointer;color:var(--muted);font-size:13px;margin:-4px 0 0}
 .msg > details[open] > summary{margin-bottom:10px}
 .msg.hidden{display:none}
@@ -2694,7 +2753,7 @@ if(collapseBtn){
     }
 
     function init() {
-        // Defensive cleanup: v1.11.4 disabled auto-resume entirely, but
+        // Defensive cleanup: v1.11.5 disabled auto-resume entirely, but
         // older versions could have left a snapshot in localStorage that
         // would no longer do anything useful. Drop it on every script
         // load so users with stuck state get a fresh start automatically.
