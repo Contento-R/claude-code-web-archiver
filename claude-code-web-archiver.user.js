@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.5
+// @version      1.11.6
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.5';
+    const VERSION = '1.11.6';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -373,6 +373,7 @@
     let chatContainer = null;
     let messagesParent = null;
     let seenNodes = new WeakSet();
+    let clickedTools = new WeakSet();   // tool widgets already expanded this run
     const cfg = () => (fastMode ? CFG_FAST : CFG_NORMAL);
 
     // ===== SETTINGS (persisted to localStorage) =====
@@ -449,7 +450,7 @@
     const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
     const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
     let lastResumeSaveTs = 0;
-    // Snapshot saving is disabled in v1.11.5 along with auto-resume.
+    // Snapshot saving is disabled in v1.11.6 along with auto-resume.
     // Kept as a no-op so the call sites in autoScroll don't need touching.
     function saveResumeSnapshot() { /* intentionally empty */ }
     function loadResumeSnapshot() {
@@ -1133,6 +1134,31 @@
             try { btn.click(); } catch (_) {}
             if (wait > 0) await sleep(wait);
         }
+        // Expand tool-call widgets so their body (command output, file
+        // contents, diffs) renders into the DOM. Claude Code Web only
+        // mounts a tool's body when it's opened, so without this the
+        // export captures nothing but the tool labels. We click each
+        // widget at most once per run (tracked in clickedTools) — a
+        // second click would collapse it again — and skip ones already
+        // open (aria-expanded="true").
+        if (!skipCode) {
+            const toolsToOpen = [];
+            for (const el of container.querySelectorAll('[class~="group/tool"]')) {
+                if (clickedTools.has(el)) continue;
+                if (el.getAttribute('aria-expanded') === 'true') { clickedTools.add(el); continue; }
+                if (!inViewport(el.getBoundingClientRect())) continue;
+                toolsToOpen.push(el);
+            }
+            // Slightly longer settle time for tool bodies — file reads can
+            // mount a lot of nodes.
+            const toolWait = Math.max(wait, 60);
+            for (const el of toolsToOpen) {
+                if (cancelled) return;
+                try { el.click(); } catch (_) {}
+                clickedTools.add(el);
+                await sleep(toolWait);
+            }
+        }
     }
 
     // ===== DEBUG / DIAGNOSTIC LOGGING =====
@@ -1244,7 +1270,8 @@
                 const title = btn.getAttribute('title') || '';
                 const tx = (btn.textContent || '').trim();
                 const cls = ((btn.className && btn.className.baseVal) || btn.className || '').toString();
-                buttons.push(`  button aria-label=${JSON.stringify(aria.slice(0, 60))} title=${JSON.stringify(title.slice(0, 60))} text=${JSON.stringify(tx.slice(0, 60))} class=${JSON.stringify(cls.slice(0, 100))}`);
+                const expanded = btn.getAttribute('aria-expanded');
+                buttons.push(`  button aria-expanded=${JSON.stringify(expanded)} aria-label=${JSON.stringify(aria.slice(0, 60))} title=${JSON.stringify(title.slice(0, 60))} text=${JSON.stringify(tx.slice(0, 60))} class=${JSON.stringify(cls.slice(0, 100))}`);
                 i++;
             }
         } catch (_) {}
@@ -2086,6 +2113,7 @@ if(collapseBtn){
         messagesParent = null;
         seenNodes = new WeakSet();
         lastCapturedLengths = new WeakMap();
+        clickedTools = new WeakSet();
         debugBuffer = [];
         sanitizeCodeStripCount = 0;
         // Refresh settings each run so changes from the modal apply
@@ -2753,7 +2781,7 @@ if(collapseBtn){
     }
 
     function init() {
-        // Defensive cleanup: v1.11.5 disabled auto-resume entirely, but
+        // Defensive cleanup: v1.11.6 disabled auto-resume entirely, but
         // older versions could have left a snapshot in localStorage that
         // would no longer do anything useful. Drop it on every script
         // load so users with stuck state get a fresh start automatically.

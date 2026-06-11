@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.6] - 2026-06-11
+
+### Fixed
+- **Tool-call BODIES (command output, file contents, diffs) are now
+  captured, not just the labels.** The earlier fixes wrapped tool
+  widgets in `<details>` and re-captured on text growth, but the
+  export still showed only flat labels (`LeerDockerfile`,
+  `Leerpackage.json` + path) with no file contents underneath.
+  Root cause: Claude Code Web mounts a tool widget's body into the
+  DOM only when the widget is opened. Sub-tool widgets (the
+  individual `Leer…` / `Ejecutado…` rows inside a group) don't carry
+  `aria-expanded="false"`, so the existing expander never clicked
+  them — their bodies were never rendered, so there was nothing to
+  capture.
+- `expandInView` now also clicks every `[class~="group/tool"]`
+  widget in the viewport (skipping ones already `aria-expanded="true"`
+  and tracking clicked widgets in a per-run WeakSet so none is
+  toggled shut by a second click). Once opened, the body renders and
+  the v1.11.4 grow-and-recapture logic picks it up. Gated behind
+  `!skipCode`, so "No code" mode doesn't waste time expanding bodies
+  it would strip anyway.
+
+### Diagnostic
+- The debug dump now records `aria-expanded` for every button, so the
+  collapsed/expanded state of tool widgets is visible in future dumps.
+
 ## [1.11.5] - 2026-06-11
 
 ### Added
