@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.7] - 2026-06-11
+
+### Fixed (attempt 2 at tool body capture)
+- **Tool-widget selector relaxed** from `[class~="group/tool"]` (exact
+  whitespace-separated token) to `[class*="group/tool"]` (substring).
+  Some buttons have `group/tool:hover` or `group/tool/focus` style
+  variants where the token isn't surrounded by whitespace; the old
+  selector silently skipped those.
+- **Per-click wait raised to ≥200 ms** (was ≥60 ms). File-reading
+  tools can mount substantial DOM and the previous wait was too tight
+  for the body to settle before `captureVisible` re-read the message.
+- **Extra 300 ms settle** after the whole batch of tool clicks, in
+  case the rendered body fetches its content asynchronously.
+
+### Diagnostic
+- Each tool click now logs to the DevTools console:
+  `[archiver] tool click "Leerpackage.json" len 1234 -> 5678`
+  Lets the user see directly whether the click is actually expanding
+  the widget (`len` growing) or doing nothing (`len` unchanged).
+
 ## [1.11.6] - 2026-06-11
 
 ### Fixed

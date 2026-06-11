@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.6
+// @version      1.11.7
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.6';
+    const VERSION = '1.11.7';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -450,7 +450,7 @@
     const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
     const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
     let lastResumeSaveTs = 0;
-    // Snapshot saving is disabled in v1.11.6 along with auto-resume.
+    // Snapshot saving is disabled in v1.11.7 along with auto-resume.
     // Kept as a no-op so the call sites in autoScroll don't need touching.
     function saveResumeSnapshot() { /* intentionally empty */ }
     function loadResumeSnapshot() {
@@ -1134,29 +1134,40 @@
             try { btn.click(); } catch (_) {}
             if (wait > 0) await sleep(wait);
         }
-        // Expand tool-call widgets so their body (command output, file
-        // contents, diffs) renders into the DOM. Claude Code Web only
-        // mounts a tool's body when it's opened, so without this the
-        // export captures nothing but the tool labels. We click each
-        // widget at most once per run (tracked in clickedTools) — a
-        // second click would collapse it again — and skip ones already
-        // open (aria-expanded="true").
+        // Expand tool-call widgets so their bodies (command output, file
+        // contents, diffs) render into the DOM. Claude Code Web mounts a
+        // tool body only when the user opens that specific widget, so
+        // without this step the export captures nothing but the
+        // top-level labels (`LeerDockerfile`, `Leerpackage.json …`).
+        //
+        // Per-run book-keeping in `clickedTools` so each widget is
+        // touched once. Substring class match (the Tailwind utility is
+        // `group/tool`, can be followed by `:hover` / `/focus` modifiers
+        // in some places — `*=` survives those, `~=` doesn't).
         if (!skipCode) {
             const toolsToOpen = [];
-            for (const el of container.querySelectorAll('[class~="group/tool"]')) {
+            for (const el of container.querySelectorAll('[class*="group/tool"]')) {
                 if (clickedTools.has(el)) continue;
                 if (el.getAttribute('aria-expanded') === 'true') { clickedTools.add(el); continue; }
                 if (!inViewport(el.getBoundingClientRect())) continue;
                 toolsToOpen.push(el);
             }
-            // Slightly longer settle time for tool bodies — file reads can
-            // mount a lot of nodes.
-            const toolWait = Math.max(wait, 60);
-            for (const el of toolsToOpen) {
-                if (cancelled) return;
-                try { el.click(); } catch (_) {}
-                clickedTools.add(el);
-                await sleep(toolWait);
+            if (toolsToOpen.length > 0) {
+                // File reads + diffs can mount substantial DOM. Give each
+                // click ~200 ms minimum.
+                const toolWait = Math.max(wait, 200);
+                for (const el of toolsToOpen) {
+                    if (cancelled) return;
+                    const label = (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+                    const before = (el.textContent || '').length;
+                    try { el.click(); } catch (_) {}
+                    clickedTools.add(el);
+                    await sleep(toolWait);
+                    const after = (el.textContent || '').length;
+                    console.debug('[archiver] tool click', JSON.stringify(label), 'len', before, '->', after);
+                }
+                // Extra settle for async-mounted bodies (file fetches etc.).
+                await sleep(300);
             }
         }
     }
@@ -2781,7 +2792,7 @@ if(collapseBtn){
     }
 
     function init() {
-        // Defensive cleanup: v1.11.6 disabled auto-resume entirely, but
+        // Defensive cleanup: v1.11.7 disabled auto-resume entirely, but
         // older versions could have left a snapshot in localStorage that
         // would no longer do anything useful. Drop it on every script
         // load so users with stuck state get a fresh start automatically.
