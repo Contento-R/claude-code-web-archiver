@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.4] - 2026-06-11
+
+### Fixed
+- **Tool-call content no longer truncated in the export.** A second
+  diagnostic dump (v1.11.3 confirmed code stripping is NOT active —
+  the `stripCode IS active` warning never fired) revealed the real
+  bug: assistant messages with many tool calls were captured the
+  first time they came into view, when most nested tool widgets
+  were still collapsed. The export therefore contained only the
+  outer button labels (`Ejecutado 22 comandos`, `Leerpackage.json`)
+  with no command output or file content underneath. As the scroll
+  loop continued and `expandInView` clicked deeper-level
+  `aria-expanded="false"` widgets, the message node's text grew —
+  but `captureVisible` saw the same content key in the `messages`
+  map and skipped the node entirely, so the stored HTML stayed at
+  its truncated first capture.
+- New strategy: keep a per-node `WeakMap` of last captured text
+  length. On every subsequent `captureVisible` pass, if the same
+  DOM node's text has grown, re-sanitise its HTML and update the
+  entry. Role, chronological position, tool tag, timestamp and
+  signals stay frozen from the first capture; only `html` changes.
+  Result: an export written after the scroll loop has had time to
+  click every disclosure widget contains the fully expanded body.
+
 ## [1.11.3] - 2026-06-09
 
 ### Fixed

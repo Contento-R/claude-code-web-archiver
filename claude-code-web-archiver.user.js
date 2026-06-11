@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.3
+// @version      1.11.4
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.3';
+    const VERSION = '1.11.4';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -449,7 +449,7 @@
     const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
     const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
     let lastResumeSaveTs = 0;
-    // Snapshot saving is disabled in v1.11.3 along with auto-resume.
+    // Snapshot saving is disabled in v1.11.4 along with auto-resume.
     // Kept as a no-op so the call sites in autoScroll don't need touching.
     function saveResumeSnapshot() { /* intentionally empty */ }
     function loadResumeSnapshot() {
@@ -1234,21 +1234,44 @@
     }
 
     // ===== CAPTURE WHAT'S CURRENTLY IN THE DOM =====
+    // Each captured node's textContent length is remembered. On subsequent
+    // calls, if a node's text has GROWN (meaning a tool-call / Show-more
+    // expansion just revealed more content), we re-sanitize its HTML so
+    // the export carries the expanded body instead of the stale partial.
+    // Other metadata (role / y / seq / tool / time / signals) stays
+    // unchanged from the first capture.
+    let lastCapturedLengths = new WeakMap();
     function captureVisible(container) {
         const containerRect = container.getBoundingClientRect();
         const scrollY = container.scrollTop || 0;
         const nodes = getMessageNodes();
         const min = cfg().minTextLen;
         for (const node of nodes) {
-            if (seenNodes.has(node)) continue;
             const text = (node.textContent || '').trim();
             if (text.length < min) continue;
+            const prevLen = lastCapturedLengths.get(node);
+            if (prevLen !== undefined && text.length <= prevLen) continue;
+
             const k = keyOf(text);
-            if (messages.has(k)) { seenNodes.add(node); continue; }
-            // "Only new" mode: skip messages already captured in prior runs
-            // for this URL. We still mark the node as seen so we don't keep
-            // re-examining it during scroll.
-            if (onlyNewActiveForRun && knownKeys.has(k)) { seenNodes.add(node); continue; }
+            const existing = messages.get(k);
+
+            if (existing) {
+                // Same content key but the node's text grew — an expand
+                // toggle (aria-expanded button, "Show more", nested tool
+                // accordion) just added content under it. Re-capture the
+                // HTML so the exported file gets the expanded body.
+                existing.html = sanitizeClone(node).outerHTML;
+                messages.set(k, existing);
+                lastCapturedLengths.set(node, text.length);
+                continue;
+            }
+
+            // "Only new" mode skips messages already captured in prior runs.
+            if (onlyNewActiveForRun && knownKeys.has(k)) {
+                lastCapturedLengths.set(node, text.length);
+                continue;
+            }
+
             let y = 0;
             try {
                 const rect = node.getBoundingClientRect();
@@ -1271,7 +1294,7 @@
                 time: detectTimestamp(node),
                 signals: captureSignals(node, text),
             });
-            seenNodes.add(node);
+            lastCapturedLengths.set(node, text.length);
             recordDebug(node, text, role);
         }
     }
@@ -2003,6 +2026,7 @@ if(collapseBtn){
         messages.clear(); seqCounter = 0; order = [];
         messagesParent = null;
         seenNodes = new WeakSet();
+        lastCapturedLengths = new WeakMap();
         debugBuffer = [];
         sanitizeCodeStripCount = 0;
         // Refresh settings each run so changes from the modal apply
@@ -2670,7 +2694,7 @@ if(collapseBtn){
     }
 
     function init() {
-        // Defensive cleanup: v1.11.3 disabled auto-resume entirely, but
+        // Defensive cleanup: v1.11.4 disabled auto-resume entirely, but
         // older versions could have left a snapshot in localStorage that
         // would no longer do anything useful. Drop it on every script
         // load so users with stuck state get a fresh start automatically.
