@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.9
+// @version      1.12.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.9';
+    const VERSION = '1.12.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -1059,30 +1059,62 @@
             cloneImgs[i].removeAttribute('srcset');
             cloneImgs[i].removeAttribute('data-src');
         }
-        clone.querySelectorAll('script,style,svg,noscript,input,textarea').forEach(e => e.remove());
+        heavySanitize(clone);
+        return clone;
+    }
+
+    // Heavy part of sanitisation — full element walk, attribute strip,
+    // tool wrapping, redaction. Runs ONCE per message: either inside
+    // sanitizeClone (skipCode path, needs the live node anyway) or at
+    // finalize time after scrolling (fast path — see finalizeRawHtml).
+    function heavySanitize(root) {
+        root.querySelectorAll('script,style,svg,noscript,input,textarea').forEach(e => e.remove());
         // Wrap each tool-call widget as <details><summary>…</summary>content</details>
         // BEFORE the button→span conversion below — by class name we
-        // can still see which buttons are tool calls. The details
-        // element is closed by default in HTML, so the human reader
-        // sees a compact collapsible block while parsers (Claude
-        // included) still get every byte of command output and file
-        // content inside the details body.
-        wrapToolCalls(clone);
-        clone.querySelectorAll('button,[role="button"]').forEach(b => {
+        // can still see which buttons are tool calls.
+        wrapToolCalls(root);
+        root.querySelectorAll('button,[role="button"]').forEach(b => {
             const span = document.createElement('span');
             span.innerHTML = b.innerHTML;
             b.replaceWith(span);
         });
         const keep = new Set(['src', 'href', 'alt', 'colspan', 'rowspan']);
-        clone.querySelectorAll('*').forEach(el => {
+        root.querySelectorAll('*').forEach(el => {
             const attrs = el.attributes;
             for (let i = attrs.length - 1; i >= 0; i--) {
                 const n = attrs[i].name;
                 if (!keep.has(n)) el.removeAttribute(n);
             }
         });
-        applyRedaction(clone);
-        return clone;
+        applyRedaction(root);
+    }
+
+    // Cheap capture-time snapshot: clone + bake real img sources. No
+    // element walk, no redaction, no tool wrapping — those run once at
+    // finalize. This keeps re-captures on text growth (v1.11.4) nearly
+    // free, instead of re-running the full sanitiser dozens of times
+    // for large tool bodies during the scroll.
+    function lightCloneHtml(node) {
+        const clone = node.cloneNode(true);
+        const liveImgs = node.querySelectorAll('img');
+        const cloneImgs = clone.querySelectorAll('img');
+        for (let i = 0; i < cloneImgs.length; i++) {
+            const real = liveImgs[i] ? bestImageSrc(liveImgs[i]) : (cloneImgs[i].src || '');
+            if (real) cloneImgs[i].setAttribute('src', real);
+            cloneImgs[i].removeAttribute('srcset');
+            cloneImgs[i].removeAttribute('data-src');
+        }
+        return clone.outerHTML;
+    }
+
+    // Turn a raw light-captured HTML string into final sanitised HTML.
+    function finalizeRawHtml(html) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        const root = tmp.firstElementChild;
+        if (!root) return html;
+        heavySanitize(root);
+        return root.outerHTML;
     }
 
     // ===== EXPAND DISCLOSURE ELEMENTS IN VIEW =====
@@ -1124,66 +1156,41 @@
             try { d.open = true; } catch (_) {}
         }
         const wait = cfg().expandWaitMs;
-        const ariaToClick = [];
+        // Batch ALL clicks (aria-expanded, show-more, tool widgets) and
+        // pay ONE settle wait per step instead of one per element. React
+        // event handlers run synchronously per click; the wait only
+        // exists for content mounting, which happens for all clicked
+        // widgets in the same render pass. Per-element sleeps were the
+        // dominant cost on long sessions (hundreds of widgets × 90-200ms).
+        let clicks = 0;
         for (const el of container.querySelectorAll('[aria-expanded="false"]')) {
-            if (inViewport(el.getBoundingClientRect())) ariaToClick.push(el);
-        }
-        for (const el of ariaToClick) {
             if (cancelled) return;
-            try { el.click(); } catch (_) {}
-            if (wait > 0) await sleep(wait);
+            if (!inViewport(el.getBoundingClientRect())) continue;
+            try { el.click(); clicks++; } catch (_) {}
         }
-        // Also handle in-bubble "Show more / Mostrar más" toggles on long
-        // user messages. They're plain `<button>` elements without an
-        // aria-expanded marker, so we match by visible text.
-        const showMoreToClick = [];
+        // In-bubble "Show more / Mostrar más" toggles on long user
+        // messages — plain buttons without aria-expanded, match by text.
         for (const btn of container.querySelectorAll('button, [role="button"]')) {
+            if (cancelled) return;
             const txt = (btn.textContent || '').trim();
             if (!isExpandToggle(txt)) continue;
             if (!inViewport(btn.getBoundingClientRect())) continue;
-            showMoreToClick.push(btn);
+            try { btn.click(); clicks++; } catch (_) {}
         }
-        for (const btn of showMoreToClick) {
-            if (cancelled) return;
-            try { btn.click(); } catch (_) {}
-            if (wait > 0) await sleep(wait);
-        }
-        // Expand tool-call widgets so their bodies (command output, file
-        // contents, diffs) render into the DOM. Claude Code Web mounts a
-        // tool body only when the user opens that specific widget, so
-        // without this step the export captures nothing but the
-        // top-level labels (`LeerDockerfile`, `Leerpackage.json …`).
-        //
-        // Per-run book-keeping in `clickedTools` so each widget is
-        // touched once. Substring class match (the Tailwind utility is
-        // `group/tool`, can be followed by `:hover` / `/focus` modifiers
-        // in some places — `*=` survives those, `~=` doesn't).
+        // Tool-call widgets: Claude Code Web mounts a tool body only
+        // when opened. clickedTools guards against a second click that
+        // would re-collapse.
         if (!skipCode) {
-            const toolsToOpen = [];
             for (const el of container.querySelectorAll('[class*="group/tool"]')) {
+                if (cancelled) return;
                 if (clickedTools.has(el)) continue;
                 if (el.getAttribute('aria-expanded') === 'true') { clickedTools.add(el); continue; }
                 if (!inViewport(el.getBoundingClientRect())) continue;
-                toolsToOpen.push(el);
-            }
-            if (toolsToOpen.length > 0) {
-                // File reads + diffs can mount substantial DOM. Give each
-                // click ~200 ms minimum.
-                const toolWait = Math.max(wait, 200);
-                for (const el of toolsToOpen) {
-                    if (cancelled) return;
-                    const label = (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-                    const before = (el.textContent || '').length;
-                    try { el.click(); } catch (_) {}
-                    clickedTools.add(el);
-                    await sleep(toolWait);
-                    const after = (el.textContent || '').length;
-                    console.debug('[archiver] tool click', JSON.stringify(label), 'len', before, '->', after);
-                }
-                // Extra settle for async-mounted bodies (file fetches etc.).
-                await sleep(300);
+                try { el.click(); clicks++; } catch (_) {}
+                clickedTools.add(el);
             }
         }
+        if (clicks > 0) await sleep(Math.max(wait, 150));
     }
 
     // ===== DEBUG / DIAGNOSTIC LOGGING =====
@@ -1371,7 +1378,7 @@
                 // toggle (aria-expanded button, "Show more", nested tool
                 // accordion) just added content under it. Re-capture the
                 // HTML so the exported file gets the expanded body.
-                existing.html = sanitizeClone(node).outerHTML;
+                existing.html = skipCode ? sanitizeClone(node).outerHTML : lightCloneHtml(node);
                 messages.set(k, existing);
                 lastCapturedLengths.set(node, text.length);
                 continue;
@@ -1390,7 +1397,7 @@
             } catch (_) { y = scrollY; }
             const role = guessRole(node);
             messages.set(k, {
-                html: sanitizeClone(node).outerHTML,
+                html: skipCode ? sanitizeClone(node).outerHTML : lightCloneHtml(node),
                 role,
                 y,
                 // Claude Code Web puts a stable chronological index on
@@ -2206,6 +2213,16 @@ if(collapseBtn){
             // clusters + structure heuristics, plus a final guarantee that
             // at least one message is "user".
             normalizeRoles();
+            // One-time heavy sanitisation of every captured message.
+            // During the scroll we only stored cheap raw clones (see
+            // lightCloneHtml); the expensive walk happens exactly once
+            // per message here. Safe to run on already-sanitised HTML
+            // too (skipCode path) — all its steps are idempotent.
+            setProgress(T.building, true);
+            for (const k of order) {
+                const e = messages.get(k);
+                if (e) e.html = finalizeRawHtml(e.html);
+            }
             setProgress(T.scrollDone(order.length), true);
             imgMap = await downloadAllImages();
             if (cancelled) {

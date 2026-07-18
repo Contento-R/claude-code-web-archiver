@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-07-18
+
+### Performance (long sessions with code: tens of minutes → minutes)
+- **Batched expansion clicks.** `expandInView` used to `await sleep()`
+  after EVERY clicked widget (90–200 ms each). A long session has
+  hundreds of aria-toggles + tool widgets, which alone accounted for
+  minutes of pure sleeping per scroll pass. All clicks in a step are
+  now fired in one synchronous batch with a single ≥150 ms settle
+  wait — content for every clicked widget mounts in the same render
+  pass anyway.
+- **Deferred heavy sanitisation.** Since v1.11.4, every text-growth
+  re-capture re-ran the full sanitiser (whole-subtree element walk,
+  attribute strip, tool wrapping, TreeWalker redaction) — big tool
+  bodies got re-sanitised dozens of times during the scroll. Capture
+  now stores a cheap raw clone (`cloneNode` + baked img sources only);
+  the heavy pass runs exactly once per message after scrolling
+  completes, right before the build step. The skipCode path keeps
+  sanitising at capture time (it needs the live node) and the
+  finalize pass is idempotent, so both modes stay correct.
+
 ## [1.11.9] - 2026-06-15
 
 ### Fixed
