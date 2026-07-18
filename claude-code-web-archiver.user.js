@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.11.8
+// @version      1.11.9
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.11.8';
+    const VERSION = '1.11.9';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -450,7 +450,7 @@
     const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
     const RESUME_MAX_BYTES = 4_000_000; // safety cap below typical 5 MB localStorage quota
     let lastResumeSaveTs = 0;
-    // Snapshot saving is disabled in v1.11.8 along with auto-resume.
+    // Snapshot saving is disabled in v1.11.2 along with auto-resume.
     // Kept as a no-op so the call sites in autoScroll don't need touching.
     function saveResumeSnapshot() { /* intentionally empty */ }
     function loadResumeSnapshot() {
@@ -1686,6 +1686,25 @@
         await sleep(Math.min(cfg().scrollWaitMs * 1.5, 600));
         // Resolve the messages parent up front so MO-wait can attach to it.
         ensureMessagesParent(container);
+        // Newer Claude Code Web builds page older history in lazily:
+        // scrollTop = 0 only reaches the top of the currently-loaded
+        // window, then the virtualizer prepends more history and pushes
+        // the viewport down. Keep slamming to the top until scrollHeight
+        // stops growing and we actually rest at ~0.
+        let prevHeight = -1, topStable = 0;
+        for (let i = 0; i < 300 && !cancelled; i++) {
+            container.scrollTop = 0;
+            await waitForMutationOrTimeout(messagesParent || container, cfg().scrollWaitMs);
+            const h = container.scrollHeight;
+            if (h === prevHeight && container.scrollTop <= 4) {
+                topStable++;
+                if (topStable >= cfg().stableLimit) break;
+            } else {
+                topStable = 0;
+            }
+            prevHeight = h;
+            setProgress(T.starting, false);
+        }
         let lastTop = -1, stable = 0, steps = 0, stuckTries = 0;
         while (!cancelled && steps < cfg().maxSteps) {
             await expandInView(container);
@@ -2811,7 +2830,7 @@ if(collapseBtn){
     }
 
     function init() {
-        // Defensive cleanup: v1.11.8 disabled auto-resume entirely, but
+        // Defensive cleanup: v1.11.2 disabled auto-resume entirely, but
         // older versions could have left a snapshot in localStorage that
         // would no longer do anything useful. Drop it on every script
         // load so users with stuck state get a fresh start automatically.

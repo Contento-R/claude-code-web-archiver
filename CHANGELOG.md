@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.9] - 2026-06-15
+
+### Fixed
+- **Archive again starts from the true beginning of the session.**
+  A Claude Code Web update made older history page in lazily:
+  `scrollTop = 0` only reaches the top of the currently-loaded
+  window, then the virtualizer prepends more history and pushes the
+  viewport down — so the archive silently started mid-session.
+  `autoScroll` now loops "jump to top → wait for mutation → check"
+  until `scrollHeight` stops growing and the viewport actually rests
+  at ~0 (stableLimit consecutive quiet rounds, 300-iteration cap),
+  and only then begins the downward capture sweep.
+
 ## [1.11.8] - 2026-06-11
 
 ### Fixed (suspected wrapToolCalls data loss)
