@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.12.0
+// @version      1.12.1
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.12.0';
+    const VERSION = '1.12.1';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -44,6 +44,7 @@
         confirm: 'The archiver will automatically scroll through the ENTIRE session, expand collapsed blocks, and download screenshots.\n\nDo not touch the page during the process. Continue?',
         noContainer: 'Chat container not found.',
         starting: 'Starting... scrolling to the top of the session.',
+        loadingHistory: (sec) => `Loading older history… ${sec}s (do not touch the page)`,
         scrolling: (n) => `Scrolling & capturing... messages: ${n}`,
         scrollDone: (n) => `Scrolling complete. Messages: ${n}. Downloading screenshots...`,
         downloading: (d, t, ok) => `Downloading screenshots... ${d}/${t} (${ok} ok)`,
@@ -123,6 +124,7 @@
             confirm: 'Архиватор прокрутит ВСЮ сессию автоматически, развернёт свёрнутые блоки и скачает скриншоты.\n\nНе трогай страницу во время процесса. Продолжить?',
             noContainer: 'Не нашёл контейнер чата.',
             starting: 'Запуск… прокрутка в начало сессии.',
+            loadingHistory: (sec) => `Подгружаю старую историю… ${sec} с (не трогай страницу)`,
             scrolling: (n) => `Прокрутка и захват… сообщений: ${n}`,
             scrollDone: (n) => `Прокрутка готова. Сообщений: ${n}. Скачиваю скриншоты…`,
             downloading: (d, t, ok) => `Скачиваю скриншоты… ${d}/${t} (${ok} ok)`,
@@ -1687,30 +1689,117 @@
         });
     }
 
+    // ===== REACHING THE TRUE TOP OF THE SESSION =====
+    // The lowest `data-index` currently mounted. The host numbers every
+    // transcript event from 0, so index 0 present == the very first turn
+    // is in the DOM. Returns null on builds that don't emit the attribute.
+    function minMountedIndex() {
+        const scope = messagesParent || chatContainer;
+        if (!scope || !scope.querySelectorAll) return null;
+        let min = null;
+        for (const el of scope.querySelectorAll('[data-index]')) {
+            const n = parseInt(el.getAttribute('data-index'), 10);
+            if (!Number.isFinite(n)) continue;
+            if (min === null || n < min) min = n;
+        }
+        return min;
+    }
+
+    // Park the viewport at the top. Plain `scrollTop = 0` can be swallowed
+    // by scroll anchoring (the browser compensates when content is
+    // prepended) or by the host's own scroll handling, so fall back to
+    // scrollTo, a wheel-up event and scrollIntoView on the first child.
+    function forceScrollTop(container) {
+        try { container.scrollTop = 0; } catch (_) {}
+        if (container.scrollTop > 4) {
+            try { container.scrollTo({ top: 0, behavior: 'instant' }); } catch (_) {}
+        }
+        if (container.scrollTop > 4) {
+            try {
+                container.dispatchEvent(new WheelEvent('wheel', {
+                    deltaY: -Math.max(600, container.clientHeight),
+                    bubbles: true, cancelable: true,
+                }));
+            } catch (_) {}
+            try {
+                const first = (messagesParent || container).firstElementChild;
+                if (first && first.scrollIntoView) first.scrollIntoView({ block: 'start' });
+            } catch (_) {}
+        }
+    }
+
+    // Sit at the top until older history stops arriving.
+    //
+    // v1.11.9 counted MutationObserver wake-ups: "N consecutive rounds with
+    // no scrollHeight change". That was the bug. waitForMutationOrTimeout
+    // resolves on the FIRST childList mutation anywhere in the subtree, and
+    // a live transcript mutates constantly (spinner frames, virtualizer
+    // node recycling). So each round could resolve in ~1-5 ms and the loop
+    // burned its whole stability budget (3-4 rounds) in a few milliseconds
+    // — while the network fetch for older history, which takes hundreds of
+    // milliseconds, was still in flight. The archive then began mid-session.
+    //
+    // The fix is to require a CONTINUOUS WALL-CLOCK quiet window measured
+    // on a fixed poll, not a count of observer wake-ups.
+    async function scrollToSessionTop(container) {
+        const POLL_MS = 120;
+        const QUIET_MS = fastMode ? 1000 : 1500;
+        const QUIET_WITH_INDEX0_MS = 600;   // shorter once the first turn is mounted
+        const MAX_MS = 120000;
+        const t0 = performance.now();
+        let prevHeight = container.scrollHeight;
+        let minSeen = minMountedIndex();
+        let sawZero = (minSeen === 0);
+        let lastChange = performance.now();
+
+        while (!cancelled) {
+            forceScrollTop(container);
+            await sleep(POLL_MS);
+            const now = performance.now();
+
+            const h = container.scrollHeight;
+            if (h !== prevHeight) { prevHeight = h; lastChange = now; }
+
+            const mi = minMountedIndex();
+            if (mi !== null) {
+                // A LOWER index than anything seen before means the host
+                // just prepended older history — reset the quiet window.
+                if (minSeen === null || mi < minSeen) { minSeen = mi; lastChange = now; }
+                if (mi === 0) sawZero = true;
+            }
+
+            const quiet = now - lastChange;
+            const atTop = container.scrollTop <= 4;
+            // Index 0 mounted is strong evidence we're at the start, but we
+            // still demand a quiet window in case a future build renumbers
+            // indexes per loaded window.
+            if (atTop && quiet >= (sawZero ? QUIET_WITH_INDEX0_MS : QUIET_MS)) return true;
+            if (now - t0 > MAX_MS) return false;
+            setProgress(T.loadingHistory(Math.round((now - t0) / 1000)), false);
+        }
+        return false;
+    }
+
     // ===== AUTO-SCROLL THROUGH THE WHOLE SESSION =====
     async function autoScroll(container) {
-        container.scrollTop = 0;
+        forceScrollTop(container);
         await sleep(Math.min(cfg().scrollWaitMs * 1.5, 600));
         // Resolve the messages parent up front so MO-wait can attach to it.
         ensureMessagesParent(container);
-        // Newer Claude Code Web builds page older history in lazily:
-        // scrollTop = 0 only reaches the top of the currently-loaded
-        // window, then the virtualizer prepends more history and pushes
-        // the viewport down. Keep slamming to the top until scrollHeight
-        // stops growing and we actually rest at ~0.
-        let prevHeight = -1, topStable = 0;
-        for (let i = 0; i < 300 && !cancelled; i++) {
-            container.scrollTop = 0;
-            await waitForMutationOrTimeout(messagesParent || container, cfg().scrollWaitMs);
-            const h = container.scrollHeight;
-            if (h === prevHeight && container.scrollTop <= 4) {
-                topStable++;
-                if (topStable >= cfg().stableLimit) break;
-            } else {
-                topStable = 0;
-            }
-            prevHeight = h;
-            setProgress(T.starting, false);
+        await scrollToSessionTop(container);
+        // Re-verify: give the host one more chance to prepend after we
+        // declared the top reached. If anything arrives, settle again.
+        for (let pass = 0; pass < 3 && !cancelled; pass++) {
+            const hBefore = container.scrollHeight;
+            const iBefore = minMountedIndex();
+            const settle = fastMode ? 600 : 900;
+            forceScrollTop(container);
+            await sleep(settle);
+            const iAfter = minMountedIndex();
+            const grew = container.scrollHeight !== hBefore ||
+                (iAfter !== null && iBefore !== null && iAfter < iBefore);
+            if (!grew) break;
+            await scrollToSessionTop(container);
         }
         let lastTop = -1, stable = 0, steps = 0, stuckTries = 0;
         while (!cancelled && steps < cfg().maxSteps) {

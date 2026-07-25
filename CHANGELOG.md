@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.1] - 2026-07-18
+
+### Fixed
+- **Archive still started mid-session — the v1.11.9 top-reach loop
+  exited within milliseconds.** Root cause: that loop counted
+  MutationObserver wake-ups ("N consecutive rounds with no
+  `scrollHeight` change"), but `waitForMutationOrTimeout` resolves on
+  the *first* childList mutation anywhere in the subtree, and a live
+  transcript mutates constantly (spinner frames, virtualizer node
+  recycling). Each round could therefore resolve in ~1–5 ms, so the
+  whole stability budget (3 rounds fast / 4 normal) was spent in a few
+  milliseconds — while the network fetch for older history, which takes
+  hundreds of milliseconds, was still in flight. The loop declared the
+  top reached and the downward sweep began part-way through the session.
+- Replaced with `scrollToSessionTop()`, which requires a **continuous
+  wall-clock quiet window** on a fixed 120 ms poll: 1000 ms (fast) /
+  1500 ms (normal) with no `scrollHeight` change and no lower
+  `data-index` appearing. Because the host numbers transcript events
+  from 0, seeing `data-index="0"` mounted is strong evidence the first
+  turn is present and shortens the required quiet window to 600 ms — a
+  quiet window is still demanded in case a future build renumbers
+  indexes per loaded window. Overall budget 120 s.
+- Added `forceScrollTop()`: plain `scrollTop = 0` can be swallowed by
+  scroll anchoring (the browser compensates when content is prepended
+  above the viewport) or by the host's own scroll handling, so it now
+  falls back to `scrollTo({behavior:'instant'})`, a wheel-up event and
+  `scrollIntoView` on the first mounted child.
+- Added a re-verification pass (up to 3 rounds): after the top is
+  declared, park at the top once more and settle; if any history
+  arrives, settle again before starting capture.
+- Progress overlay now reports `Loading older history… Ns` during this
+  phase, so a long history fetch no longer looks like a freeze.
+
 ## [1.12.0] - 2026-07-18
 
 ### Performance (long sessions with code: tens of minutes → minutes)
