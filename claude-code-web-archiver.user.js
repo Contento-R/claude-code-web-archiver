@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.14.2
+// @version      1.14.3
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.14.2';
+    const VERSION = '1.14.3';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -1469,7 +1469,15 @@
             const prevLen = lastCapturedLengths.get(node);
             if (prevLen !== undefined && text.length <= prevLen) continue;
 
-            const k = keyOf(text);
+            // Identify an entry by the host's own index when it has one.
+            // Keying on the first 220 characters of text loses messages to
+            // collisions: assistant turns routinely open with the same tool
+            // summary ("Ejecutado 3 comandos, leer 5 archivos…"), so two
+            // distinct entries could hash to one key and overwrite each
+            // other. An index is unique by construction, and it also keeps
+            // grow-and-recapture working when the visible prefix changes.
+            const di = readDataIndex(node);
+            const k = di !== null ? 'i:' + di : 't:' + keyOf(text);
             const existing = messages.get(k);
 
             if (existing) {
@@ -1505,7 +1513,7 @@
                 // verified from a real DOM dump where later-captured
                 // messages had smaller Y than earlier ones. Use the
                 // attribute when present; fall back to Y otherwise.
-                dataIndex: readDataIndex(node),
+                dataIndex: di,
                 seq: seqCounter++,
                 tool: detectTool(text, node),
                 time: detectTimestamp(node),
@@ -1941,6 +1949,8 @@
                 maxDataIndex: idx.length ? idx[idx.length - 1] : null,
                 withoutDataIndex: nullIdx,
                 indexGaps: gaps.slice(0, 20),
+                indexSpan: idx.length ? (idx[idx.length - 1] - idx[0] + 1) : 0,
+                indexesMissingInSpan: idx.length ? (idx[idx.length - 1] - idx[0] + 1 - idx.length) : 0,
                 minIndexStillInDom: minMountedIndex(),
                 container: chatContainer ? {
                     testid: chatContainer.getAttribute('data-testid') || null,

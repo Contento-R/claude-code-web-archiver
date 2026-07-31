@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.3] - 2026-07-18
+
+### Fixed
+- **Entries are keyed by `data-index` instead of their first 220
+  characters.** The text key lost messages to collisions: assistant
+  turns routinely open with an identical tool summary
+  (`Ejecutado 3 comandos, leer 5 archivos…`), so two distinct entries
+  could produce the same key and silently overwrite one another. The
+  host's index is unique by construction, and it also keeps
+  grow-and-recapture correct when the visible prefix changes as widgets
+  expand. Entries without an index fall back to the old text key.
+
+### Diagnostic
+- `RUN REPORT` adds `indexSpan` and `indexesMissingInSpan`, so the size
+  of any real gap is a number rather than a guess. Note that gaps are
+  expected to some degree: the host numbers every transcript event
+  (tool calls, tool results, system notices) but only renders some of
+  them as visible entries.
+
+### Status
+- With v1.14.0 + v1.14.2 the start-of-session failure is resolved: a
+  real run now reports `minDataIndex: 0`, `withoutDataIndex: 0` and 84
+  captured entries, against 5 with no index before.
+
 ## [1.14.2] - 2026-07-18
 
 ### Fixed (the second half of the start-of-session bug)
