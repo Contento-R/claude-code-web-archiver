@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.1] - 2026-07-18
+
+### Fixed
+- **"Check for updates" kept reporting the latest version was already
+  installed.** `raw.githubusercontent.com` is served through a CDN that
+  caches for several minutes, and `GM_xmlhttpRequest` can additionally
+  reuse the browser cache, so the check read a stale copy of the
+  userscript and compared against an old `@version`. Both the automatic
+  daily check and the manual button now append a timestamp query
+  parameter and send `Cache-Control: no-cache` / `Pragma: no-cache`.
+
 ## [1.14.0] - 2026-07-18
 
 ### Fixed (root cause of the whole start-of-session saga)

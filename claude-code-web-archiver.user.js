@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.14.0
+// @version      1.14.1
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.14.0';
+    const VERSION = '1.14.1';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -492,6 +492,12 @@
     const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
     const UPDATE_RAW_URL = 'https://raw.githubusercontent.com/Contento-R/claude-code-web-archiver/main/claude-code-web-archiver.user.js';
     let updateAvailableVersion = null;
+    // raw.githubusercontent.com is served through a CDN that caches for
+    // several minutes, and GM_xmlhttpRequest can additionally reuse the
+    // browser cache — so a plain GET kept reporting "you are on the
+    // latest version" long after a release landed. Bust both.
+    const noCacheUrl = () => UPDATE_RAW_URL + '?_=' + Date.now();
+    const NO_CACHE_HEADERS = { 'Cache-Control': 'no-cache, no-store, max-age=0', 'Pragma': 'no-cache' };
     function compareVersions(a, b) {
         const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0);
         const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0);
@@ -521,7 +527,8 @@
         try {
             GM_xmlhttpRequest({
                 method: 'GET',
-                url: UPDATE_RAW_URL,
+                url: noCacheUrl(),
+                headers: NO_CACHE_HEADERS,
                 timeout: 10000,
                 onload: (r) => {
                     if (!r || r.status < 200 || r.status >= 300 || !r.responseText) {
@@ -567,7 +574,8 @@
         try {
             GM_xmlhttpRequest({
                 method: 'GET',
-                url: UPDATE_RAW_URL,
+                url: noCacheUrl(),
+                headers: NO_CACHE_HEADERS,
                 timeout: 10000,
                 onload: (r) => {
                     if (!r || r.status < 200 || r.status >= 300 || !r.responseText) return;
