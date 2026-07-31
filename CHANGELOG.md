@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.2] - 2026-07-18
+
+### Diagnostic
+- The v1.13.0 theory was wrong: the reporting user's settings were
+  clean (`onlyNew: false`, no range), so filters were not trimming
+  anything and the fault is in capture after all.
+- Every run now prints a compact `[archiver] RUN REPORT` to the console
+  — no debug mode required — answering the questions five releases of
+  guessing failed to establish:
+  - `minDataIndex` / `maxDataIndex` — the actual index range captured,
+    so "does the export start at the beginning" becomes a number
+    instead of an impression,
+  - `indexGaps` — holes in the captured range,
+  - `withoutDataIndex` — messages captured with no index at all, which
+    would mean `readDataIndex()` is looking at the wrong element,
+  - `topReach` (`settled` / `timeout`) and `topReachSawIndexZero`,
+  - `upSweep` (`reached-top` / `stuck` / `maxsteps`), `upSweepSteps`
+    and `upSweepStuckAtScrollTop`.
+- If the lowest captured index is above 0, a second explicit warning
+  names the index and how both scroll phases ended.
+
 ## [1.13.1] - 2026-07-18
 
 ### Fixed

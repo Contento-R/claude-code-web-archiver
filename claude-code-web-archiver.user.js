@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.13.1
+// @version      1.13.2
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.13.1';
+    const VERSION = '1.13.2';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -386,6 +386,7 @@
     let messagesParent = null;
     let seenNodes = new WeakSet();
     let clickedTools = new WeakSet();   // tool widgets already expanded this run
+    let diag = {};                      // per-run facts for the end-of-run report
     const cfg = () => (fastMode ? CFG_FAST : CFG_NORMAL);
 
     // ===== SETTINGS (persisted to localStorage) =====
@@ -1783,8 +1784,8 @@
             // Index 0 mounted is strong evidence we're at the start, but we
             // still demand a quiet window in case a future build renumbers
             // indexes per loaded window.
-            if (atTop && quiet >= (sawZero ? QUIET_WITH_INDEX0_MS : QUIET_MS)) return true;
-            if (now - t0 > MAX_MS) return false;
+            if (atTop && quiet >= (sawZero ? QUIET_WITH_INDEX0_MS : QUIET_MS)) { diag.topReach = 'settled'; diag.topReachSawZero = sawZero; return true; }
+            if (now - t0 > MAX_MS) { diag.topReach = 'timeout'; diag.topReachSawZero = sawZero; return false; }
             setProgress(T.loadingHistory(Math.round((now - t0) / 1000)), false);
         }
         return false;
@@ -1798,6 +1799,7 @@
     // expanded bodies.
     async function scrollUpAndCapture(container) {
         let lastTop = -1, stuck = 0;
+        diag.upSweep = 'maxsteps';
         for (let i = 0; i < cfg().maxSteps && !cancelled; i++) {
             captureVisible(container);
             setProgress(T.scrolling(messages.size));
@@ -1809,20 +1811,63 @@
                 await sleep(fastMode ? 400 : 700);
                 captureVisible(container);
                 const mi2 = minMountedIndex();
-                if (container.scrollTop <= 4 && (mi2 === null || mi2 === 0)) return;
+                if (container.scrollTop <= 4 && (mi2 === null || mi2 === 0)) { diag.upSweep = 'reached-top'; diag.upSweepSteps = i; return; }
             }
             if (top === lastTop) {
                 // Position refused to move — try the harder techniques,
                 // then give up after a few rounds so we never hang.
                 stuck++;
                 forceScrollTop(container);
-                if (stuck >= 6) return;
+                if (stuck >= 6) { diag.upSweep = 'stuck'; diag.upSweepSteps = i; diag.upSweepStuckAt = top; return; }
             } else {
                 stuck = 0;
             }
             lastTop = top;
             container.scrollTop = Math.max(0, top - container.clientHeight * cfg().scrollStepRatio);
             await waitForMutationOrTimeout(messagesParent || container, cfg().scrollWaitMs);
+        }
+    }
+
+    // Compact end-of-run report. Answers, without needing debug mode:
+    // did we reach the start, what index range did we actually capture,
+    // and did anything get dropped. Printed to the console every run.
+    function reportRunDiagnostics() {
+        try {
+            const idx = [];
+            let nullIdx = 0;
+            for (const k of order) {
+                const e = messages.get(k);
+                if (!e) continue;
+                if (e.dataIndex === null || e.dataIndex === undefined) nullIdx++;
+                else idx.push(e.dataIndex);
+            }
+            idx.sort((a, b) => a - b);
+            const gaps = [];
+            for (let i = 1; i < idx.length; i++) {
+                if (idx[i] - idx[i - 1] > 1) gaps.push(idx[i - 1] + '..' + idx[i]);
+            }
+            const report = {
+                captured: order.length,
+                minDataIndex: idx.length ? idx[0] : null,
+                maxDataIndex: idx.length ? idx[idx.length - 1] : null,
+                withoutDataIndex: nullIdx,
+                indexGaps: gaps.slice(0, 20),
+                minIndexStillInDom: minMountedIndex(),
+                topReach: diag.topReach,
+                topReachSawIndexZero: diag.topReachSawZero,
+                upSweep: diag.upSweep,
+                upSweepSteps: diag.upSweepSteps,
+                upSweepStuckAtScrollTop: diag.upSweepStuckAt,
+            };
+            console.warn('[archiver] RUN REPORT', report);
+            if (report.minDataIndex !== null && report.minDataIndex > 0) {
+                console.warn('[archiver] The export does NOT start at the session beginning:',
+                    'lowest captured data-index is', report.minDataIndex,
+                    '- upSweep ended as', report.upSweep,
+                    'and topReach was', report.topReach);
+            }
+        } catch (e) {
+            console.warn('[archiver] diagnostics failed', e);
         }
     }
 
@@ -2301,6 +2346,7 @@ if(collapseBtn){
         seenNodes = new WeakSet();
         lastCapturedLengths = new WeakMap();
         clickedTools = new WeakSet();
+        diag = {};
         debugBuffer = [];
         sanitizeCodeStripCount = 0;
         // Refresh settings each run so changes from the modal apply
@@ -2356,6 +2402,7 @@ if(collapseBtn){
             // clusters + structure heuristics, plus a final guarantee that
             // at least one message is "user".
             normalizeRoles();
+            reportRunDiagnostics();
             // One-time heavy sanitisation of every captured message.
             // During the scroll we only stored cheap raw clones (see
             // lightCloneHtml); the expensive walk happens exactly once
