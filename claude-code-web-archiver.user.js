@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.12.1
+// @version      1.12.2
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.12.1';
+    const VERSION = '1.12.2';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -1745,7 +1745,7 @@
         const POLL_MS = 120;
         const QUIET_MS = fastMode ? 1000 : 1500;
         const QUIET_WITH_INDEX0_MS = 600;   // shorter once the first turn is mounted
-        const MAX_MS = 120000;
+        const MAX_MS = 30000;
         const t0 = performance.now();
         let prevHeight = container.scrollHeight;
         let minSeen = minMountedIndex();
@@ -1780,6 +1780,42 @@
         return false;
     }
 
+    // Walk upward to the first message, capturing on the way.
+    // No expansion clicking here — this pass only has to guarantee that
+    // every early message is seen at least once, cheaply and quickly.
+    // The downward sweep does the expanding, and captureVisible's
+    // grow-and-recapture replaces these light captures with the fully
+    // expanded bodies.
+    async function scrollUpAndCapture(container) {
+        let lastTop = -1, stuck = 0;
+        for (let i = 0; i < cfg().maxSteps && !cancelled; i++) {
+            captureVisible(container);
+            setProgress(T.scrolling(messages.size));
+            const top = container.scrollTop;
+            const mi = minMountedIndex();
+            if (top <= 4 && (mi === null || mi === 0)) {
+                // Looks like the start — settle briefly in case older
+                // history is still arriving, then confirm.
+                await sleep(fastMode ? 400 : 700);
+                captureVisible(container);
+                const mi2 = minMountedIndex();
+                if (container.scrollTop <= 4 && (mi2 === null || mi2 === 0)) return;
+            }
+            if (top === lastTop) {
+                // Position refused to move — try the harder techniques,
+                // then give up after a few rounds so we never hang.
+                stuck++;
+                forceScrollTop(container);
+                if (stuck >= 6) return;
+            } else {
+                stuck = 0;
+            }
+            lastTop = top;
+            container.scrollTop = Math.max(0, top - container.clientHeight * cfg().scrollStepRatio);
+            await waitForMutationOrTimeout(messagesParent || container, cfg().scrollWaitMs);
+        }
+    }
+
     // ===== AUTO-SCROLL THROUGH THE WHOLE SESSION =====
     async function autoScroll(container) {
         forceScrollTop(container);
@@ -1787,20 +1823,16 @@
         // Resolve the messages parent up front so MO-wait can attach to it.
         ensureMessagesParent(container);
         await scrollToSessionTop(container);
-        // Re-verify: give the host one more chance to prepend after we
-        // declared the top reached. If anything arrives, settle again.
-        for (let pass = 0; pass < 3 && !cancelled; pass++) {
-            const hBefore = container.scrollHeight;
-            const iBefore = minMountedIndex();
-            const settle = fastMode ? 600 : 900;
-            forceScrollTop(container);
-            await sleep(settle);
-            const iAfter = minMountedIndex();
-            const grew = container.scrollHeight !== hBefore ||
-                (iAfter !== null && iBefore !== null && iAfter < iBefore);
-            if (!grew) break;
-            await scrollToSessionTop(container);
-        }
+        // Slamming to the top is not always honoured: a chat UI that pins
+        // itself to the newest message, scroll anchoring, or the host's own
+        // scroll handling can drag us back down. So don't *depend* on
+        // holding position 0 — walk upward in viewport-sized steps and
+        // capture along the way. Order in the export comes from
+        // `data-index` (see buildOrder), so capture order is irrelevant;
+        // what matters is that every message is visited at least once.
+        // Bodies captured here without expansion are re-captured by the
+        // downward sweep via the grow-and-recapture path.
+        await scrollUpAndCapture(container);
         let lastTop = -1, stable = 0, steps = 0, stuckTries = 0;
         while (!cancelled && steps < cfg().maxSteps) {
             await expandInView(container);

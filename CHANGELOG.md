@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.2] - 2026-07-18
+
+### Fixed
+- **Stop depending on holding scroll position 0.** v1.12.1 fixed the
+  premature exit from the top-reach loop, but reaching the top is still
+  not guaranteed: a chat UI that pins itself to the newest message,
+  browser scroll anchoring, or the host's own scroll handling can drag
+  the viewport back down, and expanding widgets changes content heights
+  which can re-trigger that. Any strategy of the form "park at 0, then
+  sweep down" fails the moment the host wins that fight.
+- New `scrollUpAndCapture()` pass: after the top-reach attempt, walk
+  **upward** in viewport-sized steps and capture at every step, until
+  `data-index="0"` is mounted and the viewport rests at the top (or the
+  position refuses to move for 6 rounds). Because `buildOrder()` sorts
+  the export by `data-index`, capture order is irrelevant — only
+  coverage matters. So even when the host claws the viewport back, every
+  message we pass on the way is already in the store.
+- The upward pass deliberately does **no** expansion clicking: it only
+  has to be fast and complete. The downward sweep still does the
+  expanding, and `captureVisible`'s grow-and-recapture replaces the
+  light upward captures with the fully expanded bodies.
+- `scrollToSessionTop()` budget cut 120 s → 30 s, since the upward pass
+  is now the guarantee rather than a fallback.
+
 ## [1.12.1] - 2026-07-18
 
 ### Fixed
