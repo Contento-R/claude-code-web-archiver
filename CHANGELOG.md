@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.1] - 2026-07-18
+
+### Fixed
+- **Settings menu stopped opening (regression in v1.13.0).** The new
+  trim-warning banner reads `cur.onlyNew` / `cur.rangeFrom` while
+  composing the modal markup, but `const cur = loadSettings()` was
+  declared further down the function — so the read hit the temporal
+  dead zone, `showSettingsModal()` threw a `ReferenceError`, and the ⚙
+  button did nothing at all. `cur` is now loaded before the markup is
+  built.
+- The ⚙ handler is wrapped in a try/catch that logs to the console and
+  shows the error, so a throw inside the modal can never again leave
+  the button silently dead.
+
 ## [1.13.0] - 2026-07-18
 
 ### Fixed

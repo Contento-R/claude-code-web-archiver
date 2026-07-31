@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.13.0
+// @version      1.13.1
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.13.0';
+    const VERSION = '1.13.1';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -2602,6 +2602,11 @@ if(collapseBtn){
 </div>`;
         // Banner for the settings that silently shorten an export. These
         // are the usual reason an archive "doesn't start at the beginning".
+        // Load settings BEFORE composing the markup — the trim banner
+        // below reads them. (Declaring `cur` further down put it in the
+        // temporal dead zone here, which threw a ReferenceError and left
+        // the whole settings modal unable to open.)
+        const cur = loadSettings();
         const trimLines = [];
         if (cur.onlyNew) trimLines.push(T.trimOnlyNew);
         if (cur.rangeFrom || cur.rangeTo) trimLines.push(T.trimRange(cur.rangeFrom, cur.rangeTo));
@@ -2644,9 +2649,6 @@ if(collapseBtn){
 </div>`;
         document.body.appendChild(modal);
         const q = (sel) => modal.querySelector(sel);
-        // Populate from current settings (use a fresh load so concurrent
-        // tabs don't show stale values).
-        const cur = loadSettings();
         modal.querySelectorAll('[data-k]').forEach(el => {
             const k = el.getAttribute('data-k');
             if (el.type === 'checkbox') el.checked = !!cur[k];
@@ -2932,7 +2934,16 @@ if(collapseBtn){
         settingsBtn.type = 'button';
         settingsBtn.title = T.settingsTitleAttr;
         settingsBtn.textContent = '⚙';
-        settingsBtn.onclick = showSettingsModal;
+        // Never let a throw inside the modal leave the button silently
+        // dead — surface it instead.
+        settingsBtn.onclick = () => {
+            try {
+                showSettingsModal();
+            } catch (e) {
+                console.error('[archiver] settings modal failed to open', e);
+                alert(T.error + (e && e.message || e));
+            }
+        };
         panel.appendChild(settingsBtn);
 
         document.body.appendChild(panel);
