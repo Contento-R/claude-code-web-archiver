@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] - 2026-07-31
+
+The measurement added in v1.16.0 came back positive on a real session:
+`indexRenumbered: 2`. That settles the open question and invalidates the
+signal every release since v1.14.0 has been steering by.
+
+### Fixed — the start-of-session bug, root cause
+- **`data-index` is renumbered by the host as older history is prepended,
+  so index 0 means "top of what has loaded", not "start of the
+  session".** Every version since v1.14.0 treated index 0 as proof of
+  arrival, so the script stopped at the first loaded chunk and reported
+  success — `minDataIndex: 0` with the session's real beginning never
+  fetched. This matches the user's report exactly: paging up by hand to
+  the true start makes the archive complete, and nothing else does.
+- **Reaching the top no longer consults `data-index` at all.** The only
+  honest signal that no more history exists is: pinned at the top AND
+  nothing new arriving. Two arrival signals are watched, since either can
+  be the one that moves — `scrollHeight` growing (the virtualizer's
+  spacer got taller) and the mounted entry count changing.
+- **The upward motion is now a page-up-sized step instead of a slam to
+  `scrollTop = 0`.** This is what demonstrably works for the user, and it
+  keeps generating the scroll events that trigger the next lazy fetch.
+- **Added a nudge for the pinned-and-silent case.** Sitting at the top
+  generates no scroll events, so the host is never asked for the next
+  chunk — the script would wait out its idle window and conclude the
+  session had ended, while most of it had not loaded. When pinned with
+  nothing arriving, it now bounces down ~80 px and back to provoke the
+  fetch.
+- **The upward capture pass** likewise finishes on "pinned at the top and
+  `scrollHeight` stopped growing" rather than on index 0.
+- Idle window 2.5 s fast / 4 s normal; overall cap 60 s → 180 s. A long
+  session arrives in many chunks and each one legitimately restarts the
+  idle window, so the cap now only bounds the pathological case.
+
+### Fixed — "Install" in Settings did nothing
+- **The install button opened the raw URL without the cache-buster.** The
+  version *check* busts the CDN cache; the *install* did not. The
+  userscript manager was handed the same stale copy the check had just
+  looked past — identical `@version` to what is installed, so it reported
+  "already up to date" and never offered the prompt. Both paths now fetch
+  the same bytes.
+- **`window.open` replaced by `GM_openInTab` where available** (added to
+  `@grant`), falling back to `window.open` and then to a same-tab
+  navigation. `window.open` is subject to the popup blocker and in some
+  managers lands in a context where the `.user.js` navigation is not
+  intercepted, so the click could silently do nothing.
+- The button now reports that it opened the page and exposes the URL via
+  the element's tooltip, so a blocked or non-intercepted navigation is
+  visible instead of looking like a dead button.
+- `resultEl` is declared before the handlers that close over it — the
+  same pattern that produced the v1.13.1 TDZ regression.
+
+### Diagnostic
+- `RUN REPORT` replaces `topReachSawIndexZero` with `topReachMs`,
+  `topReachSteps`, `topReachGrowths`, `topReachNudges`.
+  **`topReachGrowths: 0` means the script never caused any history to
+  load**, so the export could only ever contain what was already mounted.
+
 ## [1.16.0] - 2026-07-31
 
 The start-of-session bug was reported as still present after v1.15.0.

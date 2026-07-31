@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.16.0
+// @version      1.17.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -16,6 +16,7 @@
 // @match        https://claude.com/code
 // @match        https://claude.com/code/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
 // @connect      code.claude.com
 // @connect      claude.ai
 // @connect      claude.com
@@ -34,7 +35,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.16.0';
+    const VERSION = '1.17.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -109,6 +110,7 @@
         resumePrompt: (n, minutes) => `An interrupted archive was found for this session (${n} messages, ${minutes} min ago).\n\nResume from where it stopped?`,
         updateAvailable: (v) => `New version available: v${v}`,
         updateInstall: 'Install',
+        updateOpened: 'install page opened — confirm in your userscript manager',
         updateDismiss: 'Dismiss',
         updateBadgeTitle: (v) => `Update available — v${v}. Open settings to install.`,
         startingNotice: 'Archiving — do not touch the page',
@@ -194,6 +196,7 @@
             resumePrompt: (n, minutes) => `Найден прерванный архив для этой сессии (${n} сообщений, ${minutes} мин назад).\n\nПродолжить с того места?`,
             updateAvailable: (v) => `Доступна новая версия: v${v}`,
             updateInstall: 'Установить',
+            updateOpened: 'страница установки открыта — подтверди в менеджере скриптов',
             updateDismiss: 'Скрыть',
             updateBadgeTitle: (v) => `Доступна обновлённая версия — v${v}. Открой настройки, чтобы установить.`,
             startingNotice: 'Архивирую — не трогай страницу',
@@ -498,6 +501,39 @@
     // latest version" long after a release landed. Bust both.
     const noCacheUrl = () => UPDATE_RAW_URL + '?_=' + Date.now();
     const NO_CACHE_HEADERS = { 'Cache-Control': 'no-cache, no-store, max-age=0', 'Pragma': 'no-cache' };
+    // Open the install page for the "Install" button.
+    //
+    // Two defects made this button do nothing:
+    //
+    // 1. It opened UPDATE_RAW_URL *without* the cache-buster. The version
+    //    CHECK busts the CDN cache (above) but the INSTALL did not, so the
+    //    userscript manager was handed the same stale copy the check had
+    //    just looked past — same @version as installed, therefore "already
+    //    up to date" and no install prompt. The check and the install must
+    //    fetch the same bytes.
+    // 2. `window.open` is subject to the popup blocker and, in some
+    //    managers, opens in a page context where the .user.js navigation
+    //    is not intercepted. GM_openInTab is the manager's own API and is
+    //    not blocked; fall back to window.open, then to a same-tab
+    //    navigation, so the button always does something.
+    //
+    // Returns the URL actually used so the caller can display it when
+    // every opening strategy is blocked.
+    function openUpdatePage() {
+        const url = noCacheUrl();
+        try {
+            if (typeof GM_openInTab === 'function') {
+                GM_openInTab(url, { active: true, insert: true });
+                return url;
+            }
+        } catch (_) { /* fall through */ }
+        try {
+            const w = window.open(url, '_blank');
+            if (w) return url;
+        } catch (_) { /* fall through */ }
+        try { location.href = url; } catch (_) { /* ignore */ }
+        return url;
+    }
     function compareVersions(a, b) {
         const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0);
         const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0);
@@ -1925,48 +1961,108 @@
     //
     // The fix is to require a CONTINUOUS WALL-CLOCK quiet window measured
     // on a fixed poll, not a count of observer wake-ups.
+    //
+    // v1.17.0: `data-index` is RENUMBERED by the host as older history is
+    // prepended — measured in the field, `indexRenumbered: 2` on a real
+    // run. So index 0 means "top of what has loaded so far", NOT "start of
+    // the session", and every version since 1.14.0 has been stopping at
+    // the first loaded chunk while believing it had arrived. The user's
+    // own evidence says the same thing: paging up by hand to the real
+    // start makes the archive complete, and nothing else does.
+    //
+    // So this no longer consults `data-index` at all. The only honest
+    // signal that no more history exists is: we are pinned at the top AND
+    // nothing new has arrived for a while. Two independent arrival
+    // signals are used, because either can be the one that moves:
+    //   * scrollHeight grows  — the virtualizer's spacer got taller;
+    //   * entry count changes — nodes mounted that were not there before.
+    //
+    // The motion is a PAGE-UP-SIZED STEP rather than a slam to 0, because
+    // that is what demonstrably works for the user, and because a viewport
+    // step keeps generating the scroll events that trigger the next lazy
+    // fetch. Sitting pinned at 0 generates none: without a nudge the host
+    // is never asked for the next chunk, which is why "hold position 0"
+    // could look settled while most of the session had not loaded.
     async function scrollToSessionTop(container) {
         const POLL_MS = 120;
-        const QUIET_MS = fastMode ? 1000 : 1500;
-        // Shorter once the first turn is mounted — but still longer than a
-        // history fetch, because index 0 only means "top of what is loaded"
-        // if the host numbers entries per loaded window (see the renumber
-        // counters in captureVisible).
-        const QUIET_WITH_INDEX0_MS = 1000;
-        // A long session loads its history in many lazy chunks; each one
-        // legitimately resets the quiet window. 30 s was a cap a long
-        // session could hit while history was still arriving, and the run
-        // then continued from wherever it had got to.
-        const MAX_MS = 60000;
+        // Must exceed a history fetch (hundreds of ms, more on a long
+        // session), since this is what decides "nothing more is coming".
+        const IDLE_MS = fastMode ? 2500 : 4000;
+        // Generous: a long session arrives in many chunks and each one
+        // legitimately restarts the idle window. The loop exits as soon as
+        // history stops arriving, so this cap only bounds the pathological
+        // case.
+        const MAX_MS = 180000;
         const t0 = performance.now();
+        const countEntries = () => {
+            try { return container.querySelectorAll('[data-index]').length; } catch (_) { return -1; }
+        };
+
         let prevHeight = container.scrollHeight;
-        let minSeen = minMountedIndex();
-        let sawZero = (minSeen === 0);
-        let lastChange = performance.now();
+        let prevCount = countEntries();
+        let lastArrival = performance.now();
+        let steps = 0, growths = 0, nudges = 0;
 
         while (!cancelled) {
-            forceScrollTop(container);
+            const before = container.scrollTop;
+            if (before > 0) {
+                // One viewport up — the PageUp the user presses by hand.
+                container.scrollTop = Math.max(0, before - container.clientHeight);
+                if (container.scrollTop === before) {
+                    // Assignment ignored: scrollIntoView is native and moves
+                    // whichever ancestor actually scrolls (invariant 8).
+                    try {
+                        const first = container.querySelector && container.querySelector('[data-index]');
+                        if (first && first.scrollIntoView) first.scrollIntoView({ block: 'start', inline: 'nearest' });
+                    } catch (_) { /* ignore */ }
+                }
+                steps++;
+            }
+
             await sleep(POLL_MS);
             const now = performance.now();
 
             const h = container.scrollHeight;
-            if (h !== prevHeight) { prevHeight = h; lastChange = now; }
-
-            const mi = minMountedIndex();
-            if (mi !== null) {
-                // A LOWER index than anything seen before means the host
-                // just prepended older history — reset the quiet window.
-                if (minSeen === null || mi < minSeen) { minSeen = mi; lastChange = now; }
-                if (mi === 0) sawZero = true;
+            const c = countEntries();
+            if (h !== prevHeight || c !== prevCount) {
+                if (h !== prevHeight) growths++;
+                prevHeight = h;
+                prevCount = c;
+                lastArrival = now;
             }
 
-            const quiet = now - lastChange;
+            const idle = now - lastArrival;
             const atTop = container.scrollTop <= 4;
-            // Index 0 mounted is strong evidence we're at the start, but we
-            // still demand a quiet window in case a future build renumbers
-            // indexes per loaded window.
-            if (atTop && quiet >= (sawZero ? QUIET_WITH_INDEX0_MS : QUIET_MS)) { diag.topReach = 'settled'; diag.topReachSawZero = sawZero; return true; }
-            if (now - t0 > MAX_MS) { diag.topReach = 'timeout'; diag.topReachSawZero = sawZero; return false; }
+
+            if (atTop && idle >= IDLE_MS) {
+                diag.topReach = 'settled';
+                diag.topReachMs = Math.round(now - t0);
+                diag.topReachSteps = steps;
+                diag.topReachGrowths = growths;
+                diag.topReachNudges = nudges;
+                return true;
+            }
+            // Pinned at the top with nothing arriving, but not yet long
+            // enough to call it finished: bounce down a little and back so
+            // the host sees a scroll event and can start the next fetch. A
+            // pinned, silent scroller would otherwise just wait out IDLE_MS
+            // without ever asking for more.
+            if (atTop && idle >= IDLE_MS / 2) {
+                try {
+                    container.scrollTop = Math.min(container.scrollHeight, 80);
+                    await sleep(40);
+                    container.scrollTop = 0;
+                    nudges++;
+                } catch (_) { /* ignore */ }
+            }
+            if (now - t0 > MAX_MS) {
+                diag.topReach = 'timeout';
+                diag.topReachMs = Math.round(now - t0);
+                diag.topReachSteps = steps;
+                diag.topReachGrowths = growths;
+                diag.topReachNudges = nudges;
+                return false;
+            }
             setProgress(T.loadingHistory(Math.round((now - t0) / 1000)), false);
         }
         return false;
@@ -1980,11 +2076,12 @@
     // expanded bodies.
     async function scrollUpAndCapture(container) {
         diag.upSweep = 'maxsteps';
-        // Progress is measured by the LOWEST mounted entry index, not by
-        // scrollTop. scrollTop only describes the element we happen to be
-        // driving; the index describes how far back in the conversation we
-        // have actually reached, which is the thing we care about and is
-        // immune to driving the wrong element.
+        // A falling `data-index` still means real progress backwards, so it
+        // is kept as a progress signal — but it is NOT used to decide that
+        // the start was reached, because the host renumbers indexes as
+        // history is prepended (measured: `indexRenumbered`). Arrival at
+        // the top is decided the same way scrollToSessionTop decides it:
+        // pinned at scrollTop 0 with nothing new arriving.
         // "No progress" is measured in WALL-CLOCK time, not in steps. The
         // old rule was 8 steps, and a step waits `scrollWaitMs` — 140 ms in
         // fast mode. That gave up after ~1.1 s of no new index, while
@@ -2007,18 +2104,16 @@
                 lastProgressAt = performance.now();
             }
 
-            if (mi === 0) {
-                // Index 0 is mounted. That is only evidence of the session
-                // start if the host numbers entries per session — if it
-                // numbers them per loaded window, index 0 is merely the top
-                // of what has loaded so far and older history is still on
-                // its way. So settle, then REQUIRE index 0 to still be the
-                // lowest afterwards. If more history arrived in the
-                // meantime, the index moved and the loop simply continues
-                // instead of reporting a top it never reached.
-                await sleep(fastMode ? 600 : 900);
+            // Pinned at the very top. Settle, capture again, and only
+            // finish if nothing arrived during the settle — a growing
+            // scrollHeight means older history is still being prepended,
+            // in which case this is the top of the loaded window, not of
+            // the session.
+            if (container.scrollTop <= 4) {
+                const hBefore = container.scrollHeight;
+                await sleep(fastMode ? 800 : 1200);
                 captureVisible(container);
-                if (minMountedIndex() === 0) {
+                if (container.scrollHeight === hBefore && container.scrollTop <= 4) {
                     diag.upSweep = 'reached-top';
                     diag.upSweepSteps = i;
                     diag.upSweepLowestIndex = minMountedIndex();
@@ -2104,7 +2199,16 @@
                 scrollerRedetected: !!diag.scrollerRedetected,
                 upSweepLowestIndex: diag.upSweepLowestIndex,
                 topReach: diag.topReach,
-                topReachSawIndexZero: diag.topReachSawZero,
+                // How the top was reached: elapsed ms, page-up-sized steps
+                // taken, times older history actually arrived (scrollHeight
+                // grew), and nudges needed to prod a silent scroller into
+                // fetching the next chunk. topReachGrowths is the useful
+                // one: 0 means no history was ever loaded by the script, so
+                // whatever was already mounted is all the export can have.
+                topReachMs: diag.topReachMs,
+                topReachSteps: diag.topReachSteps,
+                topReachGrowths: diag.topReachGrowths,
+                topReachNudges: diag.topReachNudges,
                 upSweep: diag.upSweep,
                 upSweepSteps: diag.upSweepSteps,
                 upSweepStuckAtScrollTop: diag.upSweepStuckAt,
@@ -3011,14 +3115,23 @@ if(collapseBtn){
         }
         q('[data-act=cancel]').onclick = close;
         q('[data-act=save]').onclick = commit;
+        // Declared before the handlers that close over it. (v1.13.1 killed
+        // the whole modal with a TDZ error from exactly this pattern.)
+        const resultEl = q('#cca-update-result');
         const installUpdate = q('[data-act=install-update]');
         if (installUpdate) installUpdate.onclick = () => {
-            // Open the raw userscript URL — Tampermonkey/Violentmonkey
-            // intercepts it and offers the reinstall prompt.
-            window.open(UPDATE_RAW_URL, '_blank', 'noopener');
+            // Opens the raw userscript URL (cache-busted) — Tampermonkey /
+            // Violentmonkey intercepts it and offers the reinstall prompt.
+            // Show the URL afterwards: if the manager did not intercept the
+            // navigation, the user still needs to be able to get at it.
+            const url = openUpdatePage();
+            if (resultEl) {
+                resultEl.textContent = ' — ' + T.updateOpened;
+                resultEl.className = 'cc-arch-update-result newer';
+                resultEl.title = url;
+            }
         };
         const checkBtn = q('[data-act=check-update]');
-        const resultEl = q('#cca-update-result');
         if (checkBtn) checkBtn.onclick = () => {
             checkBtn.disabled = true;
             const origText = checkBtn.textContent;
@@ -3049,7 +3162,13 @@ if(collapseBtn){
                         const h2 = card.querySelector('h2');
                         h2.insertAdjacentHTML('afterend', noticeHtml);
                         const newInstall = card.querySelector('[data-act=install-update]');
-                        newInstall.onclick = () => window.open(UPDATE_RAW_URL, '_blank', 'noopener');
+                        newInstall.onclick = () => {
+                            const url = openUpdatePage();
+                            if (resultEl) {
+                                resultEl.textContent = ' — ' + T.updateOpened;
+                                resultEl.title = url;
+                            }
+                        };
                     }
                 } else {
                     if (resultEl) {

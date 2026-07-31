@@ -191,7 +191,8 @@ looking at the actual markup. The debug-mode dump should have been the
 | 1.13.0 | Blamed the `onlyNew` / `rangeFrom` export filters | **Wrong hypothesis entirely.** The user's settings were clean. Cost a full release cycle and introduced a TDZ regression that killed the settings modal. |
 | 1.14.0 + 1.14.2 | Fixed `getMessageNodes()` and the scroll container | **The two actual causes.** |
 | 1.15.0 | Empirical scroller detection + index-based progress | Reported by the user as **still broken**. |
-| 1.16.0 | Entry-keyed grow-and-recapture, wall-clock stuck budget, `indexRenumbered` measurement | Current approach. Two real defects fixed (below); the decisive question is now *measured* rather than assumed. |
+| 1.16.0 | Entry-keyed grow-and-recapture, wall-clock stuck budget, `indexRenumbered` measurement | Two real defects fixed (below). Did not fix the symptom by itself — but the measurement it added identified the root cause on the next run. |
+| 1.17.0 | Stop trusting `data-index` for arrival; page-up-sized steps; nudge a pinned scroller; finish on "pinned + nothing arriving" | Current approach. Built on the measured fact that the host renumbers indexes. |
 
 **The v1.16.0 defects, both of which drop early messages:**
 
@@ -206,14 +207,25 @@ looking at the actual markup. The debug-mode dump should have been the
    long session — was still in flight. Budgets for waiting on the network
    must be wall-clock.
 
-**Open question, now instrumented:** does `data-index` number entries
-within the *session* or within the currently *loaded window*? Every
-release since 1.14.0 has assumed the former. If it is the latter, then
-`minDataIndex: 0` means "top of what has loaded" rather than "start of
-the session" — the RUN REPORT has been reporting success for runs that
-began mid-session — and index-keyed entries can overwrite each other as
-history is prepended. `indexRenumbered` in the RUN REPORT settles it.
-**Read that number before doing anything else here.**
+**ANSWERED in the field (v1.16.0 measurement, real session):
+`indexRenumbered: 2`. `data-index` is renumbered as older history is
+prepended.** It numbers entries within the **loaded window**, not within
+the session. Consequences, all of which were live bugs:
+
+- `minDataIndex: 0` never proved the export started at the beginning. It
+  meant "top of what had loaded". The RUN REPORT was reporting success
+  for runs that began mid-session — including the `captured: 84,
+  minDataIndex: 0` run that v1.14.3 recorded as the fix landing.
+- Every arrival test since v1.14.0 (`mi === 0`) stopped at the first
+  loaded chunk.
+- Index-keyed entries can be overwritten by a different message when the
+  numbering shifts under them.
+
+**Never use `data-index` as evidence of reaching the session start.** It
+remains correct as a *sort key within a single settled snapshot*, which
+is why ordering still works once loading has finished — and that is
+exactly why the manual workaround (page up to the true start, then
+archive) always produced a complete file.
 
 **Lesson:** the five scroll releases could not have worked. They tuned
 exit conditions of a loop that (a) was driving an element which does not
@@ -344,15 +356,25 @@ in-script bug.
   REPORT. Non-zero ⇒ every "we reached the start" signal since v1.14.0
   has been measuring the wrong thing, and entry identity must be rebuilt
   on something other than the raw index.
-- **v1.16.0 is unverified**, as v1.15.0 was. Confirm against a long
-  session with no manual pre-scrolling, and check `upSweep`,
-  `upSweepLowestIndex`, `minDataIndex`, `indexRenumbered`,
-  `nodeRecycled`.
-- **If the session was compacted by the host, the earliest turns are not
-  in the DOM at all** and no amount of scrolling will produce them. This
-  has never been separated from the scroll bug in a report. The way to
-  tell them apart: scroll to the top by hand and see whether the first
-  turn of the session is actually there.
+- **v1.17.0 is unverified.** Confirm against a long session with **no
+  manual pre-scrolling**. The decisive field is `topReachGrowths`: it
+  counts the times older history actually arrived. **Zero means the
+  script never caused any loading**, so the export can only contain what
+  was already mounted — the failure mode this release exists to remove.
+  Also check `topReachSteps`, `topReachNudges` and `topReach`
+  (`settled` vs `timeout`).
+- **Compaction was ruled out for the reported session:** the user
+  confirmed that paging up by hand reaches the first message and that
+  archiving from there produces a complete file. So the early turns are
+  in the DOM and reachable — the script's job is purely to get there on
+  its own.
+- The nudge (bounce 80 px down and back when pinned and silent) is a
+  guess at what provokes the host's next fetch, informed by the fact that
+  manual PageUp works. If `topReachNudges` is high while
+  `topReachGrowths` stays 0, the nudge is not the right provocation and
+  the next thing to measure is what the host actually listens to
+  (`scroll` handler on which element, IntersectionObserver on a sentinel
+  node near the top, etc.).
 - **`indexGaps: 12`** on an 84/0–125 run is *believed* normal (unrendered
   transcript events) but was never proven. `indexSpan` and
   `indexesMissingInSpan` exist to quantify it.
