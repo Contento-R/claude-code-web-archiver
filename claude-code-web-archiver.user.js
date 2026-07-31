@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.13.2
+// @version      1.13.3
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.13.2';
+    const VERSION = '1.13.3';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -1214,6 +1214,29 @@
     // the script author what signals the page actually exposes, so
     // role detection can be tuned to real DOM instead of guesses.
     let debugBuffer = [];
+    // Render a node's STRUCTURE only: every text node collapses to its
+    // length, and every attribute that can embed content (src/href/alt/
+    // title/value/style) is redacted. Diagnostics must never carry the
+    // session's actual messages, screenshots or file contents.
+    function structuralSkeleton(node, maxChars) {
+        let clone;
+        try { clone = node.cloneNode(true); } catch (_) { return '(unavailable)'; }
+        try {
+            const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+            const texts = [];
+            let t;
+            while ((t = walker.nextNode())) texts.push(t);
+            for (const n of texts) {
+                const len = (n.nodeValue || '').trim().length;
+                n.nodeValue = len ? '\u00ABtext:' + len + '\u00BB' : '';
+            }
+            const REDACT = ['src', 'href', 'alt', 'title', 'value', 'placeholder', 'srcset', 'style'];
+            clone.querySelectorAll('*').forEach(el => {
+                for (const a of REDACT) if (el.hasAttribute(a)) el.setAttribute(a, '\u00ABredacted\u00BB');
+            });
+        } catch (_) { /* best effort */ }
+        return (clone.outerHTML || '').slice(0, maxChars);
+    }
     const DEBUG_ATTRS_TO_LOG = new Set([
         'class', 'id', 'role', 'tabindex',
         'data-message-author-role', 'data-author-role', 'data-author',
@@ -1248,10 +1271,7 @@
         block.push(`Y position: ${Math.round((rect.top || 0))}`);
         const fullText = (text || '');
         block.push(`textContent length: ${fullText.length}`);
-        block.push(`Text preview (200 chars, head):`);
-        block.push(`  ${fullText.slice(0, 200).replace(/\s+/g, ' ').trim()}`);
-        block.push(`Text tail (last 300 chars):`);
-        block.push(`  ${fullText.slice(-300).replace(/\s+/g, ' ').trim()}`);
+        block.push(`(message text intentionally omitted — diagnostics carry no session content)`);
         block.push('');
 
         block.push(`-- NODE --`);
@@ -1289,14 +1309,16 @@
         const imgs = [];
         try {
             for (const img of (node.querySelectorAll ? node.querySelectorAll('img') : [])) {
-                imgs.push(`  img alt=${JSON.stringify((img.getAttribute('alt') || '').slice(0, 60))} src=${JSON.stringify((img.getAttribute('src') || '').slice(0, 120))} class=${JSON.stringify(((img.className && img.className.baseVal) || img.className || '').toString().slice(0, 100))}`);
+                const rawSrc = img.getAttribute('src') || '';
+                const kind = rawSrc.startsWith('data:') ? 'data-url' : (rawSrc ? 'remote-url' : 'none');
+                imgs.push(`  img src=${kind} srcLength=${rawSrc.length} altLength=${(img.getAttribute('alt') || '').length} class=${JSON.stringify(((img.className && img.className.baseVal) || img.className || '').toString().slice(0, 100))}`);
             }
         } catch (_) {}
         // Avatar-like containers
         const avatarContainers = [];
         try {
             for (const el of (node.querySelectorAll ? node.querySelectorAll('[class*="avatar" i],[data-testid*="avatar" i],[aria-label*="avatar" i]') : [])) {
-                avatarContainers.push(`  <${el.tagName.toLowerCase()}> class=${JSON.stringify((el.getAttribute('class') || '').slice(0, 100))} aria-label=${JSON.stringify((el.getAttribute('aria-label') || '').slice(0, 60))} text=${JSON.stringify((el.textContent || '').trim().slice(0, 30))}`);
+                avatarContainers.push(`  <${el.tagName.toLowerCase()}> class=${JSON.stringify((el.getAttribute('class') || '').slice(0, 100))} textLength=${(el.textContent || '').trim().length}`);
             }
         } catch (_) {}
         block.push(`-- AVATARS / IMAGES --`);
@@ -1321,7 +1343,7 @@
                 const cls = ((btn.className && btn.className.baseVal) || btn.className || '').toString();
                 const expanded = btn.getAttribute('aria-expanded');
                 const controls = btn.getAttribute('aria-controls');
-                buttons.push(`  button aria-expanded=${JSON.stringify(expanded)} aria-controls=${JSON.stringify(controls)} aria-label=${JSON.stringify(aria.slice(0, 60))} title=${JSON.stringify(title.slice(0, 60))} text=${JSON.stringify(tx.slice(0, 60))} class=${JSON.stringify(cls.slice(0, 100))}`);
+                buttons.push(`  button aria-expanded=${JSON.stringify(expanded)} aria-controls=${JSON.stringify(controls)} ariaLabelLength=${aria.length} titleLength=${title.length} textLength=${tx.length} isToolWidget=${cls.indexOf('group/tool') !== -1} class=${JSON.stringify(cls.slice(0, 100))}`);
                 i++;
             }
         } catch (_) {}
@@ -1341,8 +1363,8 @@
         }
         block.push('');
 
-        block.push(`-- OUTERHTML HEAD (first 5000 chars) --`);
-        block.push((node.outerHTML || '').slice(0, 5000));
+        block.push(`-- STRUCTURE SKELETON (text replaced by lengths, content attributes redacted) --`);
+        block.push(structuralSkeleton(node, 5000));
         block.push('');
         block.push('');
 
@@ -2452,13 +2474,15 @@ if(collapseBtn){
                     `Total msgs:   ${debugBuffer.length}`,
                     `Detected model: ${detectedModel || '(none)'}`,
                     '',
-                    'Purpose:  expose the DOM signals the host page uses to',
-                    '          mark user vs assistant, so the role detector',
-                    '          can be tuned to the actual structure (not',
-                    '          guesswork).',
+                    'Purpose:  expose the DOM structure the host page uses, so',
+                    '          capture and role detection can be tuned against',
+                    '          the real markup instead of guesswork.',
                     '',
-                    'Privacy:  this file contains 200-char text previews of',
-                    '          each message. Review before sharing.',
+                    'Privacy:  NO session content. Message text is reported as',
+                    '          character counts only; the structure skeleton',
+                    '          replaces every text node with its length and',
+                    '          redacts src/href/alt/title/value attributes, so',
+                    '          no prose, file contents or screenshots appear.',
                     '',
                     '=========================================================',
                     '',

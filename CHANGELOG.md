@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.3] - 2026-07-18
+
+### Changed (diagnostics carry no session content)
+- The debug dump previously embedded real conversation text: a 200-char
+  head preview, a 300-char tail, 5000 chars of raw `outerHTML`, image
+  `src` (screenshots as data URLs), and every button's visible label
+  (which includes file names). All of it is gone:
+  - message text is reported as a **character count only**;
+  - `OUTERHTML HEAD` is replaced by a **structure skeleton** — every
+    text node collapses to `«text:N»` and `src` / `href` / `alt` /
+    `title` / `value` / `placeholder` / `srcset` / `style` are redacted,
+    so tag/class/`data-*`/`aria-*` structure survives but no prose,
+    file contents or screenshots do;
+  - images report only `data-url` vs `remote-url`, the src length and
+    the alt length;
+  - buttons report `aria-expanded`, `aria-controls`, label/title/text
+    **lengths**, whether they are a tool widget, and their class.
+- The dump header now states plainly that no session content is
+  included, so the file can be shared without review.
+- `RUN REPORT` was already numbers-only and is unchanged.
+
 ## [1.13.2] - 2026-07-18
 
 ### Diagnostic
