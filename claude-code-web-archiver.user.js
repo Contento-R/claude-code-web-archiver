@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.14.3
+// @version      1.15.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.14.3';
+    const VERSION = '1.15.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -747,6 +747,46 @@
         const h1 = document.querySelector('main h1') || document.querySelector('h1');
         if (h1 && h1.textContent.trim()) return h1.textContent.trim();
         return document.title.replace(/\s*\|\s*Claude.*$/i, '').trim() || 'claude-code-session';
+    }
+
+    // Determine the scroller EMPIRICALLY instead of guessing it.
+    //
+    // Everything up to now assumed a particular element was the scroll
+    // container and assigned `scrollTop` to it. If the real scroller is a
+    // different ancestor, that assignment silently does nothing — which is
+    // exactly the reported behaviour: manual wheel scrolling reaches the
+    // start of the session, the script never does. (Synthetic WheelEvents
+    // are no help either: the browser only performs native scrolling for
+    // trusted events, so dispatching one merely notifies JS listeners.)
+    //
+    // So: take a mounted entry as a reference, walk its ancestors, and for
+    // each scrollable candidate nudge it and check whether the reference
+    // actually moved on screen. The one that moves it is the scroller.
+    function detectScroller() {
+        const ref = document.querySelector('[data-index]');
+        if (!ref) return null;
+        const baseline = ref.getBoundingClientRect().top;
+        const candidates = [];
+        for (let p = ref.parentElement; p; p = p.parentElement) {
+            try {
+                const cs = getComputedStyle(p);
+                if (/(auto|scroll|overlay)/.test(cs.overflowY) && p.scrollHeight > p.clientHeight + 4) {
+                    candidates.push(p);
+                }
+            } catch (_) { /* ignore */ }
+        }
+        if (document.scrollingElement) candidates.push(document.scrollingElement);
+        for (const c of candidates) {
+            let before;
+            try { before = c.scrollTop; } catch (_) { continue; }
+            const delta = before > 40 ? -40 : 40;
+            try { c.scrollTop = before + delta; } catch (_) { continue; }
+            const movedSelf = c.scrollTop !== before;
+            const movedRef = Math.abs(ref.getBoundingClientRect().top - baseline) > 2;
+            try { c.scrollTop = before; } catch (_) { /* ignore */ }
+            if (movedSelf && movedRef) return c;
+        }
+        return candidates.length ? candidates[0] : null;
     }
 
     function findChatContainer() {
@@ -1892,35 +1932,68 @@
     // grow-and-recapture replaces these light captures with the fully
     // expanded bodies.
     async function scrollUpAndCapture(container) {
-        let lastTop = -1, stuck = 0;
         diag.upSweep = 'maxsteps';
+        // Progress is measured by the LOWEST mounted entry index, not by
+        // scrollTop. scrollTop only describes the element we happen to be
+        // driving; the index describes how far back in the conversation we
+        // have actually reached, which is the thing we care about and is
+        // immune to driving the wrong element.
+        let bestIndex = null, noProgress = 0;
         for (let i = 0; i < cfg().maxSteps && !cancelled; i++) {
             captureVisible(container);
             setProgress(T.scrolling(messages.size));
-            const top = container.scrollTop;
+
             const mi = minMountedIndex();
-            // `null` means the host exposes no index at all — then scroll
-            // position is the only evidence we have. When an index IS
-            // available, only 0 proves we are at the session start.
-            if (top <= 4 && (mi === null || mi === 0)) {
-                // Looks like the start — settle briefly in case older
-                // history is still arriving, then confirm.
+            if (mi !== null && (bestIndex === null || mi < bestIndex)) {
+                bestIndex = mi;
+                noProgress = 0;
+            } else {
+                noProgress++;
+            }
+
+            if (mi === 0) {
+                // The first entry of the session is mounted. Settle once in
+                // case anything is still arriving, then finish.
                 await sleep(fastMode ? 400 : 700);
                 captureVisible(container);
-                const mi2 = minMountedIndex();
-                if (container.scrollTop <= 4 && (mi2 === null || mi2 === 0)) { diag.upSweep = 'reached-top'; diag.upSweepSteps = i; return; }
+                diag.upSweep = 'reached-top';
+                diag.upSweepSteps = i;
+                diag.upSweepLowestIndex = minMountedIndex();
+                return;
             }
-            if (top === lastTop) {
-                // Position refused to move — try the harder techniques,
-                // then give up after a few rounds so we never hang.
-                stuck++;
-                forceScrollTop(container);
-                if (stuck >= 6) { diag.upSweep = 'stuck'; diag.upSweepSteps = i; diag.upSweepStuckAt = top; return; }
-            } else {
-                stuck = 0;
+
+            if (noProgress >= 8) {
+                // Nothing older is appearing. Re-probe the scroller once —
+                // the layout may have changed under us — and only give up
+                // if that does not help either.
+                const probed = detectScroller();
+                if (probed && probed !== container) {
+                    container = probed;
+                    chatContainer = probed;
+                    messagesParent = null;
+                    noProgress = 0;
+                    diag.scrollerRedetected = true;
+                } else {
+                    diag.upSweep = 'stuck';
+                    diag.upSweepSteps = i;
+                    diag.upSweepLowestIndex = bestIndex;
+                    diag.upSweepStuckAt = container.scrollTop;
+                    return;
+                }
             }
-            lastTop = top;
-            container.scrollTop = Math.max(0, top - container.clientHeight * cfg().scrollStepRatio);
+
+            const step = Math.max(200, container.clientHeight * cfg().scrollStepRatio);
+            const before = container.scrollTop;
+            try { container.scrollTop = Math.max(0, before - step); } catch (_) { /* ignore */ }
+            if (container.scrollTop === before) {
+                // Assignment had no effect. scrollIntoView is native and
+                // scrolls whichever ancestors actually need to move, so it
+                // works even when we are holding the wrong element.
+                try {
+                    const first = container.querySelector && container.querySelector('[data-index]');
+                    if (first && first.scrollIntoView) first.scrollIntoView({ block: 'start', inline: 'nearest' });
+                } catch (_) { /* ignore */ }
+            }
             await waitForMutationOrTimeout(messagesParent || container, cfg().scrollWaitMs);
         }
     }
@@ -1960,6 +2033,8 @@
                     clientHeight: chatContainer.clientHeight,
                     hasDataIndexInside: !!(chatContainer.querySelector && chatContainer.querySelector('[data-index]')),
                 } : null,
+                scrollerRedetected: !!diag.scrollerRedetected,
+                upSweepLowestIndex: diag.upSweepLowestIndex,
                 topReach: diag.topReach,
                 topReachSawIndexZero: diag.topReachSawZero,
                 upSweep: diag.upSweep,
@@ -2487,7 +2562,9 @@ if(collapseBtn){
         showStartNotification(resuming);
         let imgMap = new Map();
         try {
-            chatContainer = findChatContainer();
+            // Probe for the element that genuinely scrolls the transcript;
+            // fall back to the marker/heuristic lookup only if probing fails.
+            chatContainer = detectScroller() || findChatContainer();
             if (!chatContainer) { alert(T.noContainer); return; }
             detectedModel = extractModelName();
             if (resuming) {

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-07-18
+
+### Fixed
+- **The script was driving an element that does not scroll the
+  transcript.** Decisive clue from the user: scrolling to the start of
+  the session by hand makes the archive complete; the script alone never
+  gets there. Every version so far picked a scroll container by
+  heuristic and assigned `scrollTop` to it — and if the real scroller is
+  a different ancestor, that assignment silently does nothing. The
+  "fallback" wheel events could not help: browsers perform native
+  scrolling only for trusted events, so a synthetic `WheelEvent` merely
+  notifies JS listeners and moves nothing.
+- `detectScroller()` now determines the scroller **empirically**: take a
+  mounted `[data-index]` entry as a reference, walk its ancestors,
+  nudge each scrollable candidate by 40 px and keep the one that
+  actually moves the reference on screen. `document.scrollingElement` is
+  included, so a window-level scroller is handled too.
+- The upward pass now measures progress by the **lowest mounted entry
+  index** instead of `scrollTop`. `scrollTop` only describes the element
+  being driven; the index describes how far back in the conversation we
+  have really reached, so a wrong element can no longer look like
+  success. It also re-probes the scroller once before declaring itself
+  stuck, and falls back to native `scrollIntoView` whenever a `scrollTop`
+  assignment produces no movement.
+
+### Diagnostic
+- `RUN REPORT` adds `upSweepLowestIndex` and `scrollerRedetected`.
+
 ## [1.14.3] - 2026-07-18
 
 ### Fixed
