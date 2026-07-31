@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.12.2
+// @version      1.13.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.12.2';
+    const VERSION = '1.13.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -45,6 +45,11 @@
         noContainer: 'Chat container not found.',
         starting: 'Starting... scrolling to the top of the session.',
         loadingHistory: (sec) => `Loading older history… ${sec}s (do not touch the page)`,
+        trimWarn: 'Export is being TRIMMED by your settings — this is why an archive can start mid-session.',
+        trimOnlyNew: 'Only-new mode is ON: messages archived before are skipped.',
+        trimRange: (a, b) => `Range filter is ON: only messages ${a || 1}–${b || '∞'} are exported.`,
+        trimReset: 'Archive everything (reset filters)',
+        trimResetDone: 'Filters cleared — the next archive covers the whole session.',
         scrolling: (n) => `Scrolling & capturing... messages: ${n}`,
         scrollDone: (n) => `Scrolling complete. Messages: ${n}. Downloading screenshots...`,
         downloading: (d, t, ok) => `Downloading screenshots... ${d}/${t} (${ok} ok)`,
@@ -125,6 +130,11 @@
             noContainer: 'Не нашёл контейнер чата.',
             starting: 'Запуск… прокрутка в начало сессии.',
             loadingHistory: (sec) => `Подгружаю старую историю… ${sec} с (не трогай страницу)`,
+            trimWarn: 'Выгрузка ОБРЕЗАЕТСЯ настройками — именно поэтому архив может начинаться с середины.',
+            trimOnlyNew: 'Режим «только новое» ВКЛ: ранее заархивированные сообщения пропускаются.',
+            trimRange: (a, b) => `Фильтр диапазона ВКЛ: выгружаются только сообщения ${a || 1}–${b || '∞'}.`,
+            trimReset: 'Архивировать всё (сбросить фильтры)',
+            trimResetDone: 'Фильтры сброшены — следующий архив охватит всю сессию.',
             scrolling: (n) => `Прокрутка и захват… сообщений: ${n}`,
             scrollDone: (n) => `Прокрутка готова. Сообщений: ${n}. Скачиваю скриншоты…`,
             downloading: (d, t, ok) => `Скачиваю скриншоты… ${d}/${t} (${ok} ok)`,
@@ -2299,6 +2309,18 @@ if(collapseBtn){
         recompileRedact();
         knownKeys = loadKnownKeys();
         onlyNewActiveForRun = !!settings.onlyNew;
+        // Loudly surface the two settings that silently shorten an export.
+        // `saveKnownKeys` runs after EVERY successful archive regardless of
+        // the toggle, so once "only new" is enabled every later archive
+        // skips everything already captured — which looks exactly like
+        // "the archive doesn't start at the beginning of the session".
+        if (settings.onlyNew || settings.rangeFrom || settings.rangeTo) {
+            console.warn('[archiver] EXPORT IS TRIMMED BY SETTINGS —',
+                'onlyNew:', !!settings.onlyNew,
+                'rangeFrom:', settings.rangeFrom,
+                'rangeTo:', settings.rangeTo,
+                '— open ⚙ Settings and use "Archive everything (reset filters)" for a full session archive.');
+        }
         // Auto-resume is disabled. Every Archive click starts fresh.
         // The previous resume system stored skipCode/fastMode in the
         // snapshot. Even after v1.11.1 hardened the discard logic, the
@@ -2447,6 +2469,8 @@ if(collapseBtn){
 .cc-arch-panel.collapsed > *{display:none !important}
 .cc-arch-panel.collapsed::before{content:'⬇';color:#fff;font-size:17px;font-weight:700;display:block;pointer-events:none}
 .cc-arch-panel.collapsed.has-update::after{content:'';position:absolute;top:-2px;right:-2px;width:10px;height:10px;background:#fbbf24;border-radius:50%;border:2px solid #14532d;box-sizing:border-box;display:block !important}
+.cc-arch-trim-notice{background:rgba(185,28,28,.18);border:1px solid #b91c1c;color:#fecaca;padding:10px 12px;border-radius:6px;margin:0 0 14px;font-size:12px;line-height:1.5}
+.cc-arch-trim-notice button{background:#b91c1c;color:#fff;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;font-weight:700;font-size:12px;margin-top:8px}
 .cc-arch-update-notice{background:rgba(251,191,36,.16);border:1px solid #fbbf24;color:#fde68a;padding:8px 12px;border-radius:6px;margin:0 0 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px}
 .cc-arch-update-notice button{background:#fbbf24;color:#0f1115;border:none;border-radius:4px;padding:5px 12px;cursor:pointer;font-weight:700;font-size:12px}
 .cc-arch-release-section{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin:6px 0 14px;padding:10px 12px;background:rgba(255,255,255,.04);border:1px solid #2a2f3a;border-radius:6px;font-size:12px}
@@ -2576,9 +2600,20 @@ if(collapseBtn){
     <button type="button" data-act="view-releases">${esc(T.viewReleases)}</button>
   </div>
 </div>`;
+        // Banner for the settings that silently shorten an export. These
+        // are the usual reason an archive "doesn't start at the beginning".
+        const trimLines = [];
+        if (cur.onlyNew) trimLines.push(T.trimOnlyNew);
+        if (cur.rangeFrom || cur.rangeTo) trimLines.push(T.trimRange(cur.rangeFrom, cur.rangeTo));
+        const trimNotice = trimLines.length ? `<div class="cc-arch-trim-notice">
+  <div><strong>${esc(T.trimWarn)}</strong></div>
+  ${trimLines.map(l => `<div>• ${esc(l)}</div>`).join('')}
+  <button type="button" data-act="reset-trim">${esc(T.trimReset)}</button>
+</div>` : '';
         modal.innerHTML = `<div class="cc-arch-modal-card">
   <h2>${esc(T.settingsTitle)}</h2>
   ${updateNotice}
+  ${trimNotice}
   ${releaseSection}
   <label class="block"><span>${esc(T.settingsFormat)}</span>
     <select data-k="outputFormat">
@@ -2705,6 +2740,17 @@ if(collapseBtn){
                     }
                 }
             });
+        };
+        const resetTrim = q('[data-act=reset-trim]');
+        if (resetTrim) resetTrim.onclick = () => {
+            settings = { ...loadSettings(), onlyNew: false, rangeFrom: null, rangeTo: null };
+            saveSettings(settings);
+            // Also drop the per-URL archived-key store, so "only new" can't
+            // resurrect an old exclusion list if it's switched on again.
+            try { localStorage.removeItem(knownKeysStorageKey()); } catch (_) {}
+            knownKeys = new Set();
+            close();
+            alert(T.trimResetDone);
         };
         const releasesBtn = q('[data-act=view-releases]');
         if (releasesBtn) releasesBtn.onclick = () => {

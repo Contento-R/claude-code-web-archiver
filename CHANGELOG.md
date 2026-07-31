@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-07-18
+
+### Fixed
+- **Found the real reason archives started mid-session: settings were
+  silently trimming the export, not the scroll.** Two persisted options
+  shorten a run with no indication anywhere in the UI or the output:
+  - **Only-new mode.** `saveKnownKeys()` runs after *every* successful
+    archive regardless of whether the toggle is on, so after the first
+    archive every message key for that URL is stored. With "only new"
+    enabled, each later archive then skips everything captured before —
+    producing an export that begins part-way through the session. No
+    amount of scroll fixing could affect this.
+  - **Range filter.** A leftover `From #` value makes `eachInRange()`
+    drop every message numbered below it.
+- These are now impossible to miss:
+  - a red banner at the top of the Settings modal lists exactly which
+    filters are active,
+  - a `console.warn` naming `onlyNew` / `rangeFrom` / `rangeTo` fires at
+    the start of any trimmed run,
+  - a **"Archive everything (reset filters)"** button clears `onlyNew`,
+    both range bounds, and the per-URL archived-key store in one click.
+
 ## [1.12.2] - 2026-07-18
 
 ### Fixed
