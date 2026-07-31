@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.15.0
+// @version      1.16.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.15.0';
+    const VERSION = '1.16.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -1491,13 +1491,25 @@
     }
 
     // ===== CAPTURE WHAT'S CURRENTLY IN THE DOM =====
-    // Each captured node's textContent length is remembered. On subsequent
-    // calls, if a node's text has GROWN (meaning a tool-call / Show-more
+    // Each captured ENTRY's textContent length is remembered. On subsequent
+    // calls, if the text has GROWN (meaning a tool-call / Show-more
     // expansion just revealed more content), we re-sanitize its HTML so
     // the export carries the expanded body instead of the stale partial.
     // Other metadata (role / y / seq / tool / time / signals) stays
     // unchanged from the first capture.
-    let lastCapturedLengths = new WeakMap();
+    //
+    // Keyed by entry key, NOT by DOM node. A virtualized list recycles its
+    // nodes: the same element that held a long tail message is re-used for
+    // an older, shorter one as the window slides. A node-keyed "did it
+    // grow?" test then fails forever for that older entry, so it is never
+    // captured — dropping precisely the early messages the up-sweep exists
+    // to collect. Same class of bug as keying a message by its text prefix
+    // (invariant 2): the identity used for bookkeeping must be the entry's,
+    // not that of whatever happens to render it right now.
+    let capturedLenByKey = new Map();
+    // node -> last observed {index, length, head}. Only used to detect
+    // whether the host recycles nodes or renumbers data-index; see below.
+    let nodeHistory = new WeakMap();
     function captureVisible(container) {
         const containerRect = container.getBoundingClientRect();
         const scrollY = container.scrollTop || 0;
@@ -1506,8 +1518,6 @@
         for (const node of nodes) {
             const text = (node.textContent || '').trim();
             if (text.length < min) continue;
-            const prevLen = lastCapturedLengths.get(node);
-            if (prevLen !== undefined && text.length <= prevLen) continue;
 
             // Identify an entry by the host's own index when it has one.
             // Keying on the first 220 characters of text loses messages to
@@ -1518,6 +1528,35 @@
             // grow-and-recapture working when the visible prefix changes.
             const di = readDataIndex(node);
             const k = di !== null ? 'i:' + di : 't:' + keyOf(text);
+
+            // MEASUREMENT, not a fix. Two host behaviours would invalidate
+            // the assumptions this whole pipeline rests on, and neither is
+            // visible from the outside:
+            //   * node recycling  — same element, different entry;
+            //   * index renumbering — same entry, different data-index,
+            //     which is what would happen if `data-index` is a position
+            //     in the loaded window rather than in the session. Then
+            //     `minDataIndex: 0` in the RUN REPORT means "top of what is
+            //     loaded", not "start of the session", every index-keyed
+            //     entry can be overwritten by a different message, and the
+            //     up-sweep stops early believing it arrived.
+            // This loop is the only place that observes the same node
+            // twice, so the counters are collected here and reported at the
+            // end of the run. Same text but a different index => renumber;
+            // different text => ordinary recycling.
+            const before = nodeHistory.get(node);
+            if (before && before.di !== di) {
+                if (before.len === text.length && before.head === text.slice(0, 40)) {
+                    diag.indexRenumbered = (diag.indexRenumbered || 0) + 1;
+                } else {
+                    diag.nodeRecycled = (diag.nodeRecycled || 0) + 1;
+                }
+            }
+            nodeHistory.set(node, { di, len: text.length, head: text.slice(0, 40) });
+
+            const prevLen = capturedLenByKey.get(k);
+            if (prevLen !== undefined && text.length <= prevLen) continue;
+
             const existing = messages.get(k);
 
             if (existing) {
@@ -1527,13 +1566,13 @@
                 // HTML so the exported file gets the expanded body.
                 existing.html = skipCode ? sanitizeClone(node).outerHTML : lightCloneHtml(node);
                 messages.set(k, existing);
-                lastCapturedLengths.set(node, text.length);
+                capturedLenByKey.set(k, text.length);
                 continue;
             }
 
             // "Only new" mode skips messages already captured in prior runs.
             if (onlyNewActiveForRun && knownKeys.has(k)) {
-                lastCapturedLengths.set(node, text.length);
+                capturedLenByKey.set(k, text.length);
                 continue;
             }
 
@@ -1559,7 +1598,7 @@
                 time: detectTimestamp(node),
                 signals: captureSignals(node, text),
             });
-            lastCapturedLengths.set(node, text.length);
+            capturedLenByKey.set(k, text.length);
             recordDebug(node, text, role);
         }
     }
@@ -1889,8 +1928,16 @@
     async function scrollToSessionTop(container) {
         const POLL_MS = 120;
         const QUIET_MS = fastMode ? 1000 : 1500;
-        const QUIET_WITH_INDEX0_MS = 600;   // shorter once the first turn is mounted
-        const MAX_MS = 30000;
+        // Shorter once the first turn is mounted — but still longer than a
+        // history fetch, because index 0 only means "top of what is loaded"
+        // if the host numbers entries per loaded window (see the renumber
+        // counters in captureVisible).
+        const QUIET_WITH_INDEX0_MS = 1000;
+        // A long session loads its history in many lazy chunks; each one
+        // legitimately resets the quiet window. 30 s was a cap a long
+        // session could hit while history was still arriving, and the run
+        // then continued from wherever it had got to.
+        const MAX_MS = 60000;
         const t0 = performance.now();
         let prevHeight = container.scrollHeight;
         let minSeen = minMountedIndex();
@@ -1938,7 +1985,18 @@
         // driving; the index describes how far back in the conversation we
         // have actually reached, which is the thing we care about and is
         // immune to driving the wrong element.
-        let bestIndex = null, noProgress = 0;
+        // "No progress" is measured in WALL-CLOCK time, not in steps. The
+        // old rule was 8 steps, and a step waits `scrollWaitMs` — 140 ms in
+        // fast mode. That gave up after ~1.1 s of no new index, while
+        // fetching older history over the network takes hundreds of ms and
+        // routinely longer on a long session. The up-sweep therefore
+        // declared itself "stuck" while the history it was waiting for was
+        // still in flight, and the export began mid-session. Time is the
+        // thing being waited on, so time is what the budget must be in.
+        let bestIndex = null;
+        let lastProgressAt = performance.now();
+        let reprobed = false;
+        const STUCK_MS = fastMode ? 3000 : 5000;
         for (let i = 0; i < cfg().maxSteps && !cancelled; i++) {
             captureVisible(container);
             setProgress(T.scrolling(messages.size));
@@ -1946,32 +2004,42 @@
             const mi = minMountedIndex();
             if (mi !== null && (bestIndex === null || mi < bestIndex)) {
                 bestIndex = mi;
-                noProgress = 0;
-            } else {
-                noProgress++;
+                lastProgressAt = performance.now();
             }
 
             if (mi === 0) {
-                // The first entry of the session is mounted. Settle once in
-                // case anything is still arriving, then finish.
-                await sleep(fastMode ? 400 : 700);
+                // Index 0 is mounted. That is only evidence of the session
+                // start if the host numbers entries per session — if it
+                // numbers them per loaded window, index 0 is merely the top
+                // of what has loaded so far and older history is still on
+                // its way. So settle, then REQUIRE index 0 to still be the
+                // lowest afterwards. If more history arrived in the
+                // meantime, the index moved and the loop simply continues
+                // instead of reporting a top it never reached.
+                await sleep(fastMode ? 600 : 900);
                 captureVisible(container);
-                diag.upSweep = 'reached-top';
-                diag.upSweepSteps = i;
-                diag.upSweepLowestIndex = minMountedIndex();
-                return;
+                if (minMountedIndex() === 0) {
+                    diag.upSweep = 'reached-top';
+                    diag.upSweepSteps = i;
+                    diag.upSweepLowestIndex = minMountedIndex();
+                    return;
+                }
+                lastProgressAt = performance.now();
             }
 
-            if (noProgress >= 8) {
+            if (performance.now() - lastProgressAt > STUCK_MS) {
                 // Nothing older is appearing. Re-probe the scroller once —
                 // the layout may have changed under us — and only give up
-                // if that does not help either.
-                const probed = detectScroller();
+                // if that does not help either. Once only: re-probing can
+                // legitimately return the previous element, and alternating
+                // between two candidates would spin until maxSteps.
+                const probed = !reprobed ? detectScroller() : null;
                 if (probed && probed !== container) {
                     container = probed;
                     chatContainer = probed;
                     messagesParent = null;
-                    noProgress = 0;
+                    reprobed = true;
+                    lastProgressAt = performance.now();
                     diag.scrollerRedetected = true;
                 } else {
                     diag.upSweep = 'stuck';
@@ -2040,6 +2108,10 @@
                 upSweep: diag.upSweep,
                 upSweepSteps: diag.upSweepSteps,
                 upSweepStuckAtScrollTop: diag.upSweepStuckAt,
+                // Host behaviour, measured rather than assumed. See the
+                // comment in captureVisible.
+                indexRenumbered: diag.indexRenumbered || 0,
+                nodeRecycled: diag.nodeRecycled || 0,
             };
             console.warn('[archiver] RUN REPORT', report);
             if (report.minDataIndex !== null && report.minDataIndex > 0) {
@@ -2047,6 +2119,16 @@
                     'lowest captured data-index is', report.minDataIndex,
                     '- upSweep ended as', report.upSweep,
                     'and topReach was', report.topReach);
+            }
+            // `minDataIndex: 0` is only proof of reaching the start while
+            // data-index means "position in the session". If this fires, it
+            // does not, every index-keyed entry may have been overwritten by
+            // a different message, and the whole ordering/keying scheme
+            // needs rebuilding on a different identity.
+            if (report.indexRenumbered > 0) {
+                console.warn('[archiver] data-index is RENUMBERED by the host (' + report.indexRenumbered +
+                    ' observations): the same entry was seen under different indexes.',
+                    'minDataIndex: 0 does NOT prove the export starts at the session beginning.');
             }
         } catch (e) {
             console.warn('[archiver] diagnostics failed', e);
@@ -2526,7 +2608,8 @@ if(collapseBtn){
         messages.clear(); seqCounter = 0; order = [];
         messagesParent = null;
         seenNodes = new WeakSet();
-        lastCapturedLengths = new WeakMap();
+        capturedLenByKey = new Map();
+        nodeHistory = new WeakMap();
         clickedTools = new WeakSet();
         diag = {};
         debugBuffer = [];

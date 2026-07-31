@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-07-31
+
+The start-of-session bug was reported as still present after v1.15.0.
+This release fixes one defect that provably drops early messages,
+removes one that abandoned the upward pass while history was still
+loading, and — most importantly — **measures the one host behaviour
+that would make the existing success signal a lie.**
+
+### Fixed
+- **Grow-and-recapture was keyed by DOM node, so recycled nodes silently
+  dropped older messages.** `captureVisible` remembered each captured
+  node's text length in a `WeakMap` keyed by the node, and skipped any
+  node whose text had not grown. A virtualized list recycles its
+  elements: the element that held a long message from the tail is re-used
+  for an older, shorter message as the window slides up. That older entry
+  then failed the "did it grow?" test — against a length belonging to a
+  completely different message — and was skipped on every subsequent
+  pass, so it never entered the export. This hit early messages hardest,
+  because the up-sweep reaches them through nodes that have already
+  rendered later, longer content. The bookkeeping is now keyed by entry
+  key, like the message map itself. Same class of defect as keying a
+  message by its text prefix (invariant 2): identity must belong to the
+  entry, not to whatever happens to render it at the moment.
+- **The upward pass gave up after ~1.1 s while history was still in
+  flight.** It stopped after 8 steps without a lower index, and a step
+  waits `scrollWaitMs` — 140 ms in fast mode. Fetching older history
+  takes hundreds of milliseconds and longer on a long session, so the
+  sweep declared itself `stuck` waiting for content that was still
+  loading, and the archive began mid-session. The budget is now
+  wall-clock (3 s fast / 5 s normal), because time is what is being
+  waited on. Scroller re-probing is also limited to one attempt —
+  re-probing can legitimately return the previous element, and
+  alternating between two candidates would spin until `maxSteps`.
+- **`mi === 0` no longer ends the up-sweep on its own.** After settling it
+  now re-checks that index 0 is still the lowest mounted entry. If more
+  history arrived during the settle, the index moved and the sweep
+  continues instead of reporting a top it never reached.
+- **Timeouts raised for long sessions:** the top-reach cap 30 s → 60 s
+  (a long session loads history in many lazy chunks, each legitimately
+  resetting the quiet window), and the shortened quiet window used once
+  index 0 is mounted 600 ms → 1000 ms, so it exceeds a history fetch.
+
+### Diagnostic
+- `RUN REPORT` adds **`indexRenumbered`** and **`nodeRecycled`**. These
+  answer the question the previous five releases each assumed away: does
+  `data-index` identify a position in the *session*, or in the currently
+  *loaded window*? The same node is observed across passes; the same text
+  under a different index means the host renumbers, different text means
+  ordinary recycling.
+- If `indexRenumbered > 0` the report now says so explicitly, because in
+  that case `minDataIndex: 0` does **not** prove the export starts at the
+  beginning — it means "top of what was loaded". That would also mean
+  index-keyed entries can overwrite one another, and the keying and
+  ordering scheme needs to be rebuilt on a different identity. This is
+  the single measurement that decides where the remaining work goes.
+
 ## [1.15.0] - 2026-07-18
 
 ### Fixed

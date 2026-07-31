@@ -6,7 +6,7 @@ attempting any fix to capture, ordering, role detection or scrolling —
 most obvious ideas in those areas have already been tried and failed for
 non-obvious reasons.
 
-Current version: **1.15.0**. Script: `claude-code-web-archiver.user.js`
+Current version: **1.16.0**. Script: `claude-code-web-archiver.user.js`
 (~3300 lines, single file, no build step).
 
 ---
@@ -140,18 +140,24 @@ run()
 1. **Never sort by Y when `data-index` exists.** Y is unstable.
 2. **Never key a message by its text prefix.** Collisions silently drop
    messages.
-3. **Never use message length as a role signal.** Long user prompts get
+3. **Never keep per-message bookkeeping keyed by DOM node.** The
+   virtualizer recycles nodes, so a node-keyed record silently describes
+   a different message later on. Key by the entry key, as `messages`
+   does. (Cost: v1.16.0 — early messages dropped from every export.)
+4. **Never use message length as a role signal.** Long user prompts get
    misclassified.
-4. **Never match role keywords against `outerHTML` or rendered text.**
+5. **Never match role keywords against `outerHTML` or rendered text.**
    An assistant message containing the word "user" will flip.
-5. **Never treat MutationObserver wake-ups as a settle signal.** The
+6. **Never treat MutationObserver wake-ups as a settle signal.** The
    transcript mutates continuously; use wall-clock quiet windows.
-6. **Never assume a `scrollTop` assignment worked.** Verify movement,
+7. **Never budget a wait on the network in steps.** A step's sleep is
+   tens of milliseconds; a history fetch is hundreds. Use wall-clock.
+8. **Never assume a `scrollTop` assignment worked.** Verify movement,
    and fall back to `scrollIntoView`.
-7. **Never infer the message list by drilling DOM levels.** Use
+9. **Never infer the message list by drilling DOM levels.** Use
    `[data-index]`.
-8. **Diagnostics must contain zero session content.** See §6.
-9. **Run `node -c claude-code-web-archiver.user.js` before every push.**
+10. **Diagnostics must contain zero session content.** See §6.
+11. **Run `node -c claude-code-web-archiver.user.js` before every push.**
 
 ---
 
@@ -184,7 +190,30 @@ looking at the actual markup. The debug-mode dump should have been the
 | 1.12.2 | Upward sweep capturing along the way | Right idea, but still driving a guessed element. |
 | 1.13.0 | Blamed the `onlyNew` / `rangeFrom` export filters | **Wrong hypothesis entirely.** The user's settings were clean. Cost a full release cycle and introduced a TDZ regression that killed the settings modal. |
 | 1.14.0 + 1.14.2 | Fixed `getMessageNodes()` and the scroll container | **The two actual causes.** |
-| 1.15.0 | Empirical scroller detection + index-based progress | Current approach. |
+| 1.15.0 | Empirical scroller detection + index-based progress | Reported by the user as **still broken**. |
+| 1.16.0 | Entry-keyed grow-and-recapture, wall-clock stuck budget, `indexRenumbered` measurement | Current approach. Two real defects fixed (below); the decisive question is now *measured* rather than assumed. |
+
+**The v1.16.0 defects, both of which drop early messages:**
+
+1. **Grow-and-recapture was keyed by DOM node.** `captureVisible` skipped
+   any node whose text had not grown since last time — but the length it
+   compared against was stored per *node*, and a virtualized list recycles
+   nodes. A node that held a long tail message, re-used for an older,
+   shorter one, fails that test forever, so the older entry never enters
+   the export. This is invariant 2 in a different disguise.
+2. **The up-sweep gave up after ~1.1 s** (8 steps × 140 ms in fast mode)
+   while the history fetch it was waiting for — hundreds of ms, more on a
+   long session — was still in flight. Budgets for waiting on the network
+   must be wall-clock.
+
+**Open question, now instrumented:** does `data-index` number entries
+within the *session* or within the currently *loaded window*? Every
+release since 1.14.0 has assumed the former. If it is the latter, then
+`minDataIndex: 0` means "top of what has loaded" rather than "start of
+the session" — the RUN REPORT has been reporting success for runs that
+began mid-session — and index-keyed entries can overwrite each other as
+history is prepended. `indexRenumbered` in the RUN REPORT settles it.
+**Read that number before doing anything else here.**
 
 **Lesson:** the five scroll releases could not have worked. They tuned
 exit conditions of a loop that (a) was driving an element which does not
@@ -240,6 +269,8 @@ Printed at the end of every run as `[archiver] RUN REPORT`. Numeric only.
 | `topReach` | `settled` / `timeout`. |
 | `upSweep` | `reached-top` / `stuck` / `maxsteps`. |
 | `upSweepLowestIndex`, `scrollerRedetected` | How far back the up-sweep reached; whether the scroller had to be re-probed. |
+| `indexRenumbered` | **Non-zero ⇒ `data-index` is a position in the loaded window, not in the session.** The same entry was observed under two different indexes. `minDataIndex` then proves nothing about reaching the start, and index-keyed entries can overwrite one another. Check this first. |
+| `nodeRecycled` | The host re-uses DOM nodes for different entries. Expected for a virtualized list; recorded because any per-node bookkeeping is unsafe when it is non-zero. |
 
 Reference values from a real broken run (v1.13.2):
 `captured: 5, minDataIndex: null, withoutDataIndex: 5` — this single line
@@ -307,10 +338,21 @@ in-script bug.
 
 ## 8. Open items
 
-- **v1.15.0 is unverified.** The empirical scroller detection and
-  index-based up-sweep have not been confirmed against a long session
-  without manual pre-scrolling. Check `upSweep`, `upSweepLowestIndex`
-  and `minDataIndex` in the next RUN REPORT.
+- **Is `data-index` per-session or per-loaded-window?** The one question
+  that decides whether the current keying/ordering design is sound at
+  all. v1.16.0 instruments it: read `indexRenumbered` from the RUN
+  REPORT. Non-zero ⇒ every "we reached the start" signal since v1.14.0
+  has been measuring the wrong thing, and entry identity must be rebuilt
+  on something other than the raw index.
+- **v1.16.0 is unverified**, as v1.15.0 was. Confirm against a long
+  session with no manual pre-scrolling, and check `upSweep`,
+  `upSweepLowestIndex`, `minDataIndex`, `indexRenumbered`,
+  `nodeRecycled`.
+- **If the session was compacted by the host, the earliest turns are not
+  in the DOM at all** and no amount of scrolling will produce them. This
+  has never been separated from the scroll bug in a report. The way to
+  tell them apart: scroll to the top by hand and see whether the first
+  turn of the session is actually there.
 - **`indexGaps: 12`** on an 84/0–125 run is *believed* normal (unrendered
   transcript events) but was never proven. `indexSpan` and
   `indexesMissingInSpan` exist to quantify it.
