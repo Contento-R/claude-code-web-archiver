@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.14.1
+// @version      1.14.2
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.14.1';
+    const VERSION = '1.14.2';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -750,21 +750,48 @@
     }
 
     function findChatContainer() {
+        // The scroller in Claude Code Web is the virtual transcript itself —
+        // [data-testid="epitaxy-virtual-transcript"], confirmed in every
+        // diagnostic dump. Take it outright when present. The old
+        // largest-scrollable-area heuristic could land on some other
+        // scrollable wrapper; scrolling that wrapper is a no-op for the
+        // transcript, so the session never actually moved and only the
+        // mounted tail of the conversation ever got captured.
+        const known = document.querySelector('[data-testid="epitaxy-virtual-transcript"]')
+            || document.querySelector('[data-testid*="transcript" i]');
+        if (known) return known;
+        // Fallback 1: a scrollable element that CONTAINS the host's
+        // per-entry markers beats a merely large scrollable element.
+        // Fallback 2: the old area heuristic.
         const main = document.querySelector('main') || document.body;
-        let best = main, bestArea = 0;
+        let best = null, bestArea = 0, bestAny = null, bestAnyArea = 0;
         for (const el of main.querySelectorAll('*')) {
             const cs = getComputedStyle(el);
-            if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
-                el.scrollHeight > el.clientHeight + 50) {
-                const area = el.scrollHeight * el.clientWidth;
-                if (area > bestArea) { bestArea = area; best = el; }
-            }
+            if (!((cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
+                  el.scrollHeight > el.clientHeight + 50)) continue;
+            const area = el.scrollHeight * el.clientWidth;
+            if (area > bestAnyArea) { bestAnyArea = area; bestAny = el; }
+            if (area > bestArea && el.querySelector('[data-index]')) { bestArea = area; best = el; }
         }
-        return best;
+        return best || bestAny || main;
     }
 
     function ensureMessagesParent(container) {
         if (messagesParent && messagesParent.isConnected) return messagesParent;
+        // Derive it from the host's own entry markers when available: the
+        // parent of the [data-index] nodes IS the list body. The drilling
+        // heuristic below stops at whatever level happened to have a single
+        // text-bearing child when it first ran, which could land inside one
+        // message — and this parent feeds the MutationObserver target and
+        // the scrollIntoView fallbacks, so getting it wrong made those
+        // silently watch/scroll the wrong subtree.
+        if (container && container.querySelector) {
+            const firstIndexed = container.querySelector('[data-index]');
+            if (firstIndexed && firstIndexed.parentElement) {
+                messagesParent = firstIndexed.parentElement;
+                return messagesParent;
+            }
+        }
         const min = cfg().minTextLen;
         let cur = container;
         for (let d = 0; d < 12; d++) {
@@ -1915,6 +1942,14 @@
                 withoutDataIndex: nullIdx,
                 indexGaps: gaps.slice(0, 20),
                 minIndexStillInDom: minMountedIndex(),
+                container: chatContainer ? {
+                    testid: chatContainer.getAttribute('data-testid') || null,
+                    classHead: (chatContainer.getAttribute('class') || '').slice(0, 60),
+                    scrollTop: Math.round(chatContainer.scrollTop),
+                    scrollHeight: chatContainer.scrollHeight,
+                    clientHeight: chatContainer.clientHeight,
+                    hasDataIndexInside: !!(chatContainer.querySelector && chatContainer.querySelector('[data-index]')),
+                } : null,
                 topReach: diag.topReach,
                 topReachSawIndexZero: diag.topReachSawZero,
                 upSweep: diag.upSweep,

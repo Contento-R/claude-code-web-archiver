@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.2] - 2026-07-18
+
+### Fixed (the second half of the start-of-session bug)
+- **`findChatContainer()` could pick the wrong scroller.** It chose the
+  largest scrollable element under `<main>`. If that was some other
+  wrapper rather than the transcript itself, every `scrollTop = 0` and
+  every scroll step operated on an element the conversation does not
+  live in — the transcript never moved, its `scrollTop` read 0 from the
+  start, `scrollUpAndCapture()` saw `top <= 4` on its very first
+  iteration and returned `reached-top` immediately, and only the handful
+  of entries already mounted were ever captured. That matches the
+  v1.13.2 report exactly (`captured: 5`).
+- The container is now taken directly from the host's own marker,
+  `[data-testid="epitaxy-virtual-transcript"]`. Fallbacks, in order: the
+  largest scrollable element that actually **contains** `[data-index]`
+  entries, then the old largest-area heuristic.
+- **`ensureMessagesParent()` now derives the list body from the entry
+  markers too** — the parent of the `[data-index]` nodes. Its drilling
+  heuristic could stop inside a single message, and this value is the
+  MutationObserver target and the `scrollIntoView` fallback anchor, so a
+  wrong result made both silently act on the wrong subtree.
+
+### Diagnostic
+- `RUN REPORT` now includes a `container` block: `data-testid`, class
+  head, live `scrollTop` / `scrollHeight` / `clientHeight`, and whether
+  `[data-index]` entries exist inside it. One glance confirms whether
+  the right element is being scrolled.
+
 ## [1.14.1] - 2026-07-18
 
 ### Fixed
