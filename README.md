@@ -123,6 +123,11 @@ No data is sent anywhere except the GitHub raw URL above for update detection.
 
 Pull requests and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+Working on the internals? Read **[MAINTAINERS.md](MAINTAINERS.md)** first —
+it documents the host DOM, the capture pipeline, the invariants that must
+not be broken, and a register of approaches that have already been tried
+and failed.
+
 ## Credits
 
 Based on **["Claude Code Web to Markdown"](https://greasyfork.org/scripts/560005)** by **Aiuanyu** (MIT).
