@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-07-18
+
+### Fixed (root cause of the whole start-of-session saga)
+- The v1.13.2 run report settled it: `captured: 5`,
+  `withoutDataIndex: 5`, `minDataIndex: null`. Not one captured node
+  carried a `data-index`, and only five "messages" were found in a
+  long session.
+- Cause: `ensureMessagesParent()` drills down while exactly one child
+  has text, then **caches** the level it lands on. Which level that is
+  depends on how many entries happened to be mounted the instant it
+  first ran. When it stopped one level too deep it handed back the
+  internals of a *single* message as though they were the whole
+  conversation — hence five fragments, none with an index.
+- Everything downstream was therefore running blind: `buildOrder()`
+  sorts by `dataIndex`, so with every value `null` it silently fell
+  back to y/seq, and `minMountedIndex()` could not tell whether the
+  session start was mounted. Five releases of scroll fixes could not
+  have helped — the message list itself was wrong.
+- `getMessageNodes()` now takes the host's own per-message markers
+  directly (`[data-index]` under the scroll container) and only falls
+  back to the drilling heuristic when the attribute is absent.
+- `readDataIndex()` additionally looks at descendants, for layouts that
+  wrap each entry in a positioning div.
+- `minMountedIndex()` scans the whole scroller instead of the drilled
+  parent, so it no longer inherits a bad parent resolution.
+
 ## [1.13.3] - 2026-07-18
 
 ### Changed (diagnostics carry no session content)

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.13.3
+// @version      1.14.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -34,7 +34,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.13.3';
+    const VERSION = '1.14.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -771,6 +771,26 @@
     }
 
     function getMessageNodes() {
+        // The host marks every transcript entry with `data-index`. Use that
+        // directly instead of guessing which nesting level holds messages.
+        //
+        // ensureMessagesParent() drills down while exactly one child has
+        // text, so the level it lands on depends on how many entries were
+        // mounted at the instant it first ran — and it caches that. When it
+        // stopped one level too deep it returned the internals of a single
+        // message as if they were the whole conversation (a real run
+        // reported 5 "messages", none of them carrying a data-index).
+        const scope = chatContainer;
+        if (scope && scope.querySelectorAll) {
+            const min0 = cfg().minTextLen;
+            const indexed = [];
+            for (const el of scope.querySelectorAll('[data-index]')) {
+                const t = el.textContent;
+                if (!t || t.trim().length <= min0) continue;
+                indexed.push(el);
+            }
+            if (indexed.length >= 1) return indexed;
+        }
         const parent = ensureMessagesParent(chatContainer);
         const min = cfg().minTextLen;
         const out = [];
@@ -1374,6 +1394,7 @@
     // Read data-index off the node or up to 5 ancestors. Used as the
     // primary chronological-order key for the epitaxy virtualised list.
     function readDataIndex(node) {
+        // On the node itself or an ancestor...
         let p = node;
         for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
             if (!p.getAttribute) continue;
@@ -1383,6 +1404,14 @@
                 if (Number.isFinite(n)) return n;
             }
         }
+        // ...or on a descendant, for layouts that wrap each entry.
+        try {
+            const inner = node.querySelector && node.querySelector('[data-index]');
+            if (inner) {
+                const n = parseInt(inner.getAttribute('data-index'), 10);
+                if (Number.isFinite(n)) return n;
+            }
+        } catch (_) { /* ignore */ }
         return null;
     }
 
@@ -1727,7 +1756,7 @@
     // transcript event from 0, so index 0 present == the very first turn
     // is in the DOM. Returns null on builds that don't emit the attribute.
     function minMountedIndex() {
-        const scope = messagesParent || chatContainer;
+        const scope = chatContainer || messagesParent;
         if (!scope || !scope.querySelectorAll) return null;
         let min = null;
         for (const el of scope.querySelectorAll('[data-index]')) {
@@ -1827,6 +1856,9 @@
             setProgress(T.scrolling(messages.size));
             const top = container.scrollTop;
             const mi = minMountedIndex();
+            // `null` means the host exposes no index at all — then scroll
+            // position is the only evidence we have. When an index IS
+            // available, only 0 proves we are at the session start.
             if (top <= 4 && (mi === null || mi === 0)) {
                 // Looks like the start — settle briefly in case older
                 // history is still arriving, then confirm.
