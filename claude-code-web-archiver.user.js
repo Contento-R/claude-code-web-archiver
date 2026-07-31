@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code Web Session Archiver
 // @namespace    https://github.com/Contento-R/claude-code-web-archiver
-// @version      1.17.0
+// @version      1.18.0
 // @description  Archive a full Claude Code Web session into one self-contained HTML file: auto-scroll, expand collapsed blocks, download screenshots, optional fast mode and code-strip. Multi-locale UI (EN/RU/DE/FR/ES) auto-selected from the browser locale.
 // @description:ru Архивирует всю сессию Claude Code Web в один автономный HTML: авто-прокрутка, разворачивание свёрнутых блоков, скачивание скриншотов, режимы ускорения и пропуска кода. UI на EN/RU/DE/FR/ES по локали браузера.
 // @author       Contento-R
@@ -35,7 +35,7 @@
 
 (function () {
     'use strict';
-    const VERSION = '1.17.0';
+    const VERSION = '1.18.0';
 
     // ===== I18N =====
     // Default English dictionary; other locales fall back to English for
@@ -1977,12 +1977,17 @@
     //   * scrollHeight grows  — the virtualizer's spacer got taller;
     //   * entry count changes — nodes mounted that were not there before.
     //
-    // The motion is a PAGE-UP-SIZED STEP rather than a slam to 0, because
-    // that is what demonstrably works for the user, and because a viewport
-    // step keeps generating the scroll events that trigger the next lazy
-    // fetch. Sitting pinned at 0 generates none: without a nudge the host
-    // is never asked for the next chunk, which is why "hold position 0"
-    // could look settled while most of the session had not loaded.
+    // The motion is: JUMP straight to 0, then BOUNCE while pinned there.
+    //
+    // v1.17.0 walked up a viewport at a time, copying what the user does
+    // with PageUp. It reached the start but was slow — hundreds of polls to
+    // cross ground a single assignment crosses instantly. The walk was
+    // never the reason it worked: the SCROLL EVENTS were. A pinned scroller
+    // emits none, so the host is never asked for the next chunk, and that
+    // silence — not the scroll distance — is why "slam to 0 and wait" could
+    // look settled with most of the session unloaded. Bouncing half a
+    // viewport down and back on every poll produces those events far more
+    // cheaply than traversing the transcript to produce them.
     async function scrollToSessionTop(container) {
         const POLL_MS = 120;
         // Must exceed a history fetch (hundreds of ms, more on a long
@@ -2006,8 +2011,14 @@
         while (!cancelled) {
             const before = container.scrollTop;
             if (before > 0) {
-                // One viewport up — the PageUp the user presses by hand.
-                container.scrollTop = Math.max(0, before - container.clientHeight);
+                // Jump the whole way to the top in one assignment. v1.17.0
+                // stepped up one viewport at a time, which is what a person
+                // does with PageUp — but a person is not the reason that
+                // works, the scroll events are, and the bounce below
+                // produces those far more cheaply. On a long transcript the
+                // viewport-sized walk cost hundreds of polls to cross
+                // ground the jump crosses instantly.
+                container.scrollTop = 0;
                 if (container.scrollTop === before) {
                     // Assignment ignored: scrollIntoView is native and moves
                     // whichever ancestor actually scrolls (invariant 8).
@@ -2017,6 +2028,21 @@
                     } catch (_) { /* ignore */ }
                 }
                 steps++;
+            } else {
+                // Already pinned at the top: bounce down and straight back.
+                // This is the whole engine of the load loop. A pinned
+                // scroller emits no scroll events, so the host is never
+                // asked for the next chunk — that silence, not the scroll
+                // distance, is what made "slam to 0 and wait" look settled
+                // while most of the session had not loaded. Bouncing on
+                // every poll asks again immediately instead of sitting out
+                // an idle window between chunks.
+                try {
+                    container.scrollTop = Math.max(120, Math.round(container.clientHeight * 0.5));
+                    await sleep(30);
+                    container.scrollTop = 0;
+                    nudges++;
+                } catch (_) { /* ignore */ }
             }
 
             await sleep(POLL_MS);
@@ -2041,19 +2067,6 @@
                 diag.topReachGrowths = growths;
                 diag.topReachNudges = nudges;
                 return true;
-            }
-            // Pinned at the top with nothing arriving, but not yet long
-            // enough to call it finished: bounce down a little and back so
-            // the host sees a scroll event and can start the next fetch. A
-            // pinned, silent scroller would otherwise just wait out IDLE_MS
-            // without ever asking for more.
-            if (atTop && idle >= IDLE_MS / 2) {
-                try {
-                    container.scrollTop = Math.min(container.scrollHeight, 80);
-                    await sleep(40);
-                    container.scrollTop = 0;
-                    nudges++;
-                } catch (_) { /* ignore */ }
             }
             if (now - t0 > MAX_MS) {
                 diag.topReach = 'timeout';
@@ -2199,12 +2212,13 @@
                 scrollerRedetected: !!diag.scrollerRedetected,
                 upSweepLowestIndex: diag.upSweepLowestIndex,
                 topReach: diag.topReach,
-                // How the top was reached: elapsed ms, page-up-sized steps
-                // taken, times older history actually arrived (scrollHeight
-                // grew), and nudges needed to prod a silent scroller into
-                // fetching the next chunk. topReachGrowths is the useful
-                // one: 0 means no history was ever loaded by the script, so
-                // whatever was already mounted is all the export can have.
+                // How the top was reached: elapsed ms, jumps back to 0 after
+                // the host pushed us down, times older history actually
+                // arrived (scrollHeight grew), and bounces used to prod a
+                // pinned scroller into fetching the next chunk.
+                // topReachGrowths is the useful one: 0 means no history was
+                // ever loaded by the script, so whatever was already
+                // mounted is all the export can have.
                 topReachMs: diag.topReachMs,
                 topReachSteps: diag.topReachSteps,
                 topReachGrowths: diag.topReachGrowths,

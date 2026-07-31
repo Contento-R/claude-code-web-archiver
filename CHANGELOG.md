@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] - 2026-07-31
+
+v1.17.0 reached the start of the session but took a long time doing it.
+Same destination, far less travel.
+
+### Changed
+- **The upward motion is a jump to `scrollTop = 0` again, not a walk up
+  one viewport at a time.** v1.17.0 copied what the user does by hand
+  with PageUp — but the walk was never the reason it worked, the
+  **scroll events** were. On a long transcript the viewport-sized walk
+  spent hundreds of polls crossing ground a single assignment crosses
+  instantly.
+- **The bounce is now the engine of the load loop, not a last resort.**
+  Previously it only fired after half the idle window had elapsed with
+  nothing arriving; now every poll that finds the scroller already
+  pinned at the top bounces half a viewport down and straight back. That
+  is what asks the host for the next chunk, and asking immediately beats
+  sitting out an idle window between chunks. The bounce is also larger
+  (half a viewport, min 120 px) than the previous fixed 80 px.
+
+The exit condition is unchanged and still the honest one: pinned at the
+top with neither `scrollHeight` nor the mounted entry count moving for
+the full idle window.
+
+### Diagnostic
+- `topReachSteps` now counts jumps back to 0 after the host pushed the
+  viewport down, and `topReachNudges` counts bounces. On a healthy run
+  bounces should greatly outnumber jumps.
+
 ## [1.17.0] - 2026-07-31
 
 The measurement added in v1.16.0 came back positive on a real session:

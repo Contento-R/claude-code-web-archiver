@@ -6,7 +6,7 @@ attempting any fix to capture, ordering, role detection or scrolling —
 most obvious ideas in those areas have already been tried and failed for
 non-obvious reasons.
 
-Current version: **1.16.0**. Script: `claude-code-web-archiver.user.js`
+Current version: **1.18.0**. Script: `claude-code-web-archiver.user.js`
 (~3300 lines, single file, no build step).
 
 ---
@@ -32,7 +32,7 @@ guesswork. Guessing at this layer caused the majority of the bugs below.
 | Purpose | Marker | Notes |
 |---|---|---|
 | Scroll container | `[data-testid="epitaxy-virtual-transcript"]` | Canonical. Do not infer it by size. |
-| Transcript entry | `[data-index="N"]` | Stable chronological index. **Primary sort key.** |
+| Transcript entry | `[data-index="N"]` | Chronological **within one settled snapshot** — the primary sort key. **NOT stable over time:** the host renumbers as older history is prepended (measured, §5). Never evidence of reaching the start. |
 | **User turn** | `.epitaxy-user-turn` | 100 % accurate on the verified sample (6 user / 7 assistant). |
 | User turn (secondary) | CSS vars `--ui-user-message-background`, `--ui-user-message-primary-text` | Appear in the Tailwind class string. |
 | Assistant turn | `.epitaxy-markdown`, `.text-assistant-primary`, `.text-assistant-secondary` | Never carries `.epitaxy-user-turn`. |
@@ -101,10 +101,12 @@ run()
  ├─ detectScroller()            empirical: nudge each scrollable ancestor
  │                              of a mounted [data-index] by 40px, keep
  │                              the one that actually moves it on screen
- ├─ scrollToSessionTop()        continuous wall-clock quiet window
- │                              (1000 ms fast / 1500 ms normal), 30 s cap
- ├─ scrollUpAndCapture()        walk UP, capture at every step; progress
- │                              measured by minMountedIndex(), not scrollTop
+ ├─ scrollToSessionTop()        jump to 0, then bounce half a viewport on
+ │                              every pinned poll to keep the lazy loader
+ │                              fetching; exits on pinned + no arrivals
+ │                              (2.5 s fast / 4 s normal), 180 s cap
+ ├─ scrollUpAndCapture()        walk UP, capture at every step; finishes on
+ │                              pinned + scrollHeight stopped growing
  ├─ downward sweep              expandInView() + captureVisible() per step
  ├─ buildOrder()                sort by dataIndex → y → seq
  ├─ normalizeRoles()            no-op when the primary detector worked
@@ -118,9 +120,10 @@ run()
 - **Capture order is irrelevant.** `buildOrder()` sorts by `data-index`,
   so the up-sweep can capture in reverse. Only *coverage* matters. This
   is what makes the upward pass a valid safety net.
-- **Grow-and-recapture.** `lastCapturedLengths` (a `WeakMap` node →
-  text length) re-captures an entry whenever its text grows, so bodies
-  that mount later (tool expansion) replace earlier truncated captures.
+- **Grow-and-recapture.** `capturedLenByKey` (entry key → text length)
+  re-captures an entry whenever its text grows, so bodies that mount
+  later (tool expansion) replace earlier truncated captures. Keyed by
+  entry, never by node — see invariant 3.
 - **Two-tier sanitisation.** During scrolling only `lightCloneHtml()`
   runs (clone + bake image `src`). The expensive pass
   (`heavySanitize`: element walk, attribute strip, `wrapToolCalls`,
@@ -192,7 +195,16 @@ looking at the actual markup. The debug-mode dump should have been the
 | 1.14.0 + 1.14.2 | Fixed `getMessageNodes()` and the scroll container | **The two actual causes.** |
 | 1.15.0 | Empirical scroller detection + index-based progress | Reported by the user as **still broken**. |
 | 1.16.0 | Entry-keyed grow-and-recapture, wall-clock stuck budget, `indexRenumbered` measurement | Two real defects fixed (below). Did not fix the symptom by itself — but the measurement it added identified the root cause on the next run. |
-| 1.17.0 | Stop trusting `data-index` for arrival; page-up-sized steps; nudge a pinned scroller; finish on "pinned + nothing arriving" | Current approach. Built on the measured fact that the host renumbers indexes. |
+| 1.17.0 | Stop trusting `data-index` for arrival; page-up-sized steps; nudge a pinned scroller; finish on "pinned + nothing arriving" | **Reached the start** — first version to do so unaided. But slow: the viewport-sized walk cost hundreds of polls. |
+| 1.18.0 | Same exit condition; jump to 0 instead of walking, bounce on every pinned poll | Current approach. |
+
+**What actually drives the lazy load: scroll events, not scroll
+distance.** v1.17.0 walked up a viewport at a time because that is what
+the user does with PageUp, and it worked — but the walk was incidental.
+A pinned scroller emits no events, so the host is never asked for the
+next chunk; that silence is why "slam to 0 and wait" looked settled with
+most of the session unloaded. Bouncing half a viewport down and back
+produces the same events without traversing the transcript.
 
 **The v1.16.0 defects, both of which drop early messages:**
 
@@ -356,25 +368,22 @@ in-script bug.
   REPORT. Non-zero ⇒ every "we reached the start" signal since v1.14.0
   has been measuring the wrong thing, and entry identity must be rebuilt
   on something other than the raw index.
-- **v1.17.0 is unverified.** Confirm against a long session with **no
-  manual pre-scrolling**. The decisive field is `topReachGrowths`: it
-  counts the times older history actually arrived. **Zero means the
-  script never caused any loading**, so the export can only contain what
-  was already mounted — the failure mode this release exists to remove.
-  Also check `topReachSteps`, `topReachNudges` and `topReach`
-  (`settled` vs `timeout`).
+- **v1.17.0 was confirmed in the field to reach the session start
+  unaided** (the first version that did). v1.18.0 keeps its exit
+  condition and only changes how the scroller is moved, so the thing to
+  re-verify is that it still arrives — check `topReachGrowths` (times
+  history actually loaded; **zero means the script loaded nothing**) and
+  `topReachMs` for the speed it was meant to buy.
 - **Compaction was ruled out for the reported session:** the user
   confirmed that paging up by hand reaches the first message and that
   archiving from there produces a complete file. So the early turns are
   in the DOM and reachable — the script's job is purely to get there on
   its own.
-- The nudge (bounce 80 px down and back when pinned and silent) is a
-  guess at what provokes the host's next fetch, informed by the fact that
-  manual PageUp works. If `topReachNudges` is high while
-  `topReachGrowths` stays 0, the nudge is not the right provocation and
-  the next thing to measure is what the host actually listens to
-  (`scroll` handler on which element, IntersectionObserver on a sentinel
-  node near the top, etc.).
+- If a future build stops loading again and `topReachNudges` is high
+  while `topReachGrowths` stays 0, the bounce is no longer the right
+  provocation. The next thing to measure is what the host actually
+  listens to: a `scroll` handler (on which element?), or an
+  IntersectionObserver on a sentinel node near the top of the list.
 - **`indexGaps: 12`** on an 84/0–125 run is *believed* normal (unrendered
   transcript events) but was never proven. `indexSpan` and
   `indexesMissingInSpan` exist to quantify it.
